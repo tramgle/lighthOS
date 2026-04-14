@@ -52,6 +52,17 @@ void vga_clear(void) {
     vga_update_cursor();
 }
 
+void vga_get_cursor(int *row, int *col) {
+    *row = vga_row;
+    *col = vga_col;
+}
+
+void vga_putchar_at(char c, int row, int col) {
+    if (row >= 0 && row < VGA_HEIGHT && col >= 0 && col < VGA_WIDTH) {
+        vga_buffer[row * VGA_WIDTH + col] = vga_entry(c, vga_color_attr);
+    }
+}
+
 void vga_set_color(uint8_t fg, uint8_t bg) {
     vga_color_attr = vga_make_color(fg, bg);
 }

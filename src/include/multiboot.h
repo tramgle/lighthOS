@@ -30,6 +30,14 @@ typedef struct {
     uint32_t type;
 } __attribute__((packed)) multiboot_mmap_entry_t;
 
+typedef struct {
+    uint32_t mod_start;   /* physical address of module start */
+    uint32_t mod_end;     /* physical address of module end */
+    uint32_t cmdline;     /* module command line string (physical addr) */
+    uint32_t reserved;
+} __attribute__((packed)) multiboot_mod_t;
+
 #define MULTIBOOT_MMAP_AVAILABLE 1
+#define MULTIBOOT_FLAG_MODS (1 << 3)
 
 #endif

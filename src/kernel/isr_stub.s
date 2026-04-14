@@ -83,7 +83,13 @@ IRQ 13, 45
 IRQ 14, 46
 IRQ 15, 47
 
+; Software interrupts (not hardware IRQs — no EOI needed)
+ISR_NOERR 128   ; INT 0x80 = syscall
+ISR_NOERR 130   ; INT 0x82 = yield
+
 ; Common handler: save all registers, call C handler, restore, iret
+; isr_handler returns a registers_t* in eax (possibly a different stack
+; for context switching). We use that as the new esp before restoring.
 isr_common:
     pusha                   ; push eax, ecx, edx, ebx, esp, ebp, esi, edi
     push ds
@@ -99,7 +105,7 @@ isr_common:
 
     push esp                ; pointer to registers_t on stack
     call isr_handler
-    add esp, 4              ; pop the argument
+    mov esp, eax            ; use returned stack pointer (may be different task)
 
     pop gs
     pop fs

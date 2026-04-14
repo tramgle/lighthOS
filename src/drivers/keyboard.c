@@ -52,26 +52,25 @@ static void kbd_enqueue(char c) {
     }
 }
 
-static void keyboard_callback(registers_t *regs) {
-    (void)regs;
+static registers_t *keyboard_callback(registers_t *regs) {
     uint8_t scancode = inb(KBD_DATA_PORT);
 
     /* Extended scancode prefix */
     if (scancode == 0xE0) {
         extended = true;
-        return;
+        return regs;
     }
 
     if (extended) {
         extended = false;
-        if (scancode & 0x80) return;  /* extended key release, ignore */
+        if (scancode & 0x80) return regs;
         switch (scancode) {
-        case 0x48: kbd_enqueue(KEY_UP);    return;
-        case 0x50: kbd_enqueue(KEY_DOWN);  return;
-        case 0x4B: kbd_enqueue(KEY_LEFT);  return;
-        case 0x4D: kbd_enqueue(KEY_RIGHT); return;
+        case 0x48: kbd_enqueue(KEY_UP);    return regs;
+        case 0x50: kbd_enqueue(KEY_DOWN);  return regs;
+        case 0x4B: kbd_enqueue(KEY_LEFT);  return regs;
+        case 0x4D: kbd_enqueue(KEY_RIGHT); return regs;
         }
-        return;
+        return regs;
     }
 
     /* Key release */
@@ -80,23 +79,22 @@ static void keyboard_callback(registers_t *regs) {
         if (released == 0x2A || released == 0x36) {
             shift_held = false;
         }
-        return;
+        return regs;
     }
 
     /* Key press */
     if (scancode == 0x2A || scancode == 0x36) {
         shift_held = true;
-        return;
+        return regs;
     }
     if (scancode == 0x3A) {
         caps_on = !caps_on;
-        return;
+        return regs;
     }
 
     bool use_upper = shift_held;
     char c = scancode_lower[scancode];
 
-    /* Caps lock only affects letters */
     if (caps_on && c >= 'a' && c <= 'z') {
         use_upper = !use_upper;
     }
@@ -108,6 +106,7 @@ static void keyboard_callback(registers_t *regs) {
     if (c) {
         kbd_enqueue(c);
     }
+    return regs;
 }
 
 void keyboard_init(void) {

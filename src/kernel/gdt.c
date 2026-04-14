@@ -14,13 +14,15 @@ struct gdt_ptr {
     uint32_t base;
 } __attribute__((packed));
 
-static struct gdt_entry gdt[5];
+#define GDT_ENTRIES 6
+
+static struct gdt_entry gdt[GDT_ENTRIES];
 static struct gdt_ptr   gdtp;
 
 extern void gdt_flush(struct gdt_ptr *ptr);
 
-static void gdt_set_entry(int idx, uint32_t base, uint32_t limit,
-                           uint8_t access, uint8_t gran) {
+void gdt_set_entry(int idx, uint32_t base, uint32_t limit,
+                   uint8_t access, uint8_t gran) {
     gdt[idx].base_low    = base & 0xFFFF;
     gdt[idx].base_mid    = (base >> 16) & 0xFF;
     gdt[idx].base_high   = (base >> 24) & 0xFF;
@@ -34,10 +36,11 @@ void gdt_init(void) {
     gdtp.base  = (uint32_t)&gdt;
 
     gdt_set_entry(0, 0, 0,       0x00, 0x00);  /* Null */
-    gdt_set_entry(1, 0, 0xFFFFF, 0x9A, 0xCF);  /* Kernel code */
-    gdt_set_entry(2, 0, 0xFFFFF, 0x92, 0xCF);  /* Kernel data */
-    gdt_set_entry(3, 0, 0xFFFFF, 0xFA, 0xCF);  /* User code */
-    gdt_set_entry(4, 0, 0xFFFFF, 0xF2, 0xCF);  /* User data */
+    gdt_set_entry(1, 0, 0xFFFFF, 0x9A, 0xCF);  /* Kernel code (0x08) */
+    gdt_set_entry(2, 0, 0xFFFFF, 0x92, 0xCF);  /* Kernel data (0x10) */
+    gdt_set_entry(3, 0, 0xFFFFF, 0xFA, 0xCF);  /* User code   (0x18, RPL3=0x1B) */
+    gdt_set_entry(4, 0, 0xFFFFF, 0xF2, 0xCF);  /* User data   (0x20, RPL3=0x23) */
+    /* Entry 5 (0x28) reserved for TSS — set up by tss_init() */
 
     gdt_flush(&gdtp);
 }

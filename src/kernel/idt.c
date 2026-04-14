@@ -39,6 +39,9 @@ extern void irq9(void);  extern void irq10(void); extern void irq11(void);
 extern void irq12(void); extern void irq13(void); extern void irq14(void);
 extern void irq15(void);
 
+extern void isr128(void);  /* syscall */
+extern void isr130(void);  /* yield */
+
 void idt_set_gate(uint8_t num, uint32_t handler, uint16_t selector, uint8_t flags) {
     idt[num].offset_low  = handler & 0xFFFF;
     idt[num].offset_high = (handler >> 16) & 0xFFFF;
@@ -103,6 +106,10 @@ void idt_init(void) {
     idt_set_gate(45, (uint32_t)irq13, 0x08, 0x8E);
     idt_set_gate(46, (uint32_t)irq14, 0x08, 0x8E);
     idt_set_gate(47, (uint32_t)irq15, 0x08, 0x8E);
+
+    /* Software interrupts */
+    idt_set_gate(128, (uint32_t)isr128, 0x08, 0xEE);  /* syscall: DPL=3 so ring 3 can invoke */
+    idt_set_gate(130, (uint32_t)isr130, 0x08, 0x8E);  /* yield: DPL=0, kernel only */
 
     idt_flush(&idtp);
 }

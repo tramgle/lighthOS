@@ -11,6 +11,10 @@
 #include "fs/simplefs.h"
 #include "fs/blkdev.h"
 #include "drivers/ramdisk.h"
+#include "kernel/task.h"
+#include "kernel/process.h"
+#include "kernel/timer.h"
+#include "mm/vmm.h"
 
 /* Forward declarations */
 static void cmd_help(int argc, char **argv);
@@ -28,6 +32,12 @@ static void cmd_mount(int argc, char **argv);
 static void cmd_umount(int argc, char **argv);
 static void cmd_free(int argc, char **argv);
 static void cmd_mkfs(int argc, char **argv);
+static void cmd_ps(int argc, char **argv);
+static void cmd_exec(int argc, char **argv);
+static void cmd_uptime(int argc, char **argv);
+static void cmd_hexdump(int argc, char **argv);
+static void cmd_pagemap(int argc, char **argv);
+static void cmd_regions(int argc, char **argv);
 
 static const command_t command_table[] = {
     {"help",   "Show available commands",     cmd_help},
@@ -44,7 +54,13 @@ static const command_t command_table[] = {
     {"mount",  "Mount a filesystem",           cmd_mount},
     {"umount", "Unmount a filesystem",         cmd_umount},
     {"free",   "Show memory statistics",       cmd_free},
+    {"ps",     "List running processes",          cmd_ps},
+    {"exec",   "Run an ELF program",             cmd_exec},
+    {"uptime", "Show system uptime",            cmd_uptime},
     {"mkfs",   "Format a block device",        cmd_mkfs},
+    {"hexdump","Dump memory: hexdump <hex> [n]", cmd_hexdump},
+    {"pagemap","Decode PDE/PTE for a vaddr",    cmd_pagemap},
+    {"regions","Show PMM free/used regions",    cmd_regions},
 };
 
 #define NUM_COMMANDS (sizeof(command_table) / sizeof(command_table[0]))
@@ -348,6 +364,148 @@ static void cmd_free(int argc, char **argv) {
     kprintf("Kernel heap:\n");
     kprintf("  Used:  %u bytes\n", heap_get_used());
     kprintf("  Free:  %u bytes\n", heap_get_free());
+}
+
+static void cmd_ps(int argc, char **argv) {
+    (void)argc; (void)argv;
+    process_list_all();
+}
+
+static void cmd_uptime(int argc, char **argv) {
+    (void)argc; (void)argv;
+    uint32_t ticks = timer_get_ticks();
+    uint32_t secs = ticks / 100;
+    uint32_t mins = secs / 60;
+    kprintf("Uptime: %um %us (%u ticks)\n", mins, secs % 60, ticks);
+}
+
+static void cmd_exec(int argc, char **argv) {
+    if (argc < 2) {
+        kprintf("Usage: exec <path>\n");
+        return;
+    }
+    char path[VFS_MAX_PATH];
+    shell_resolve_path(argv[1], path, VFS_MAX_PATH);
+
+    int pid = process_spawn(path, 0);
+    if (pid < 0) {
+        kprintf("exec: failed to run %s\n", argv[1]);
+        return;
+    }
+    /* Wait for the child to finish (foreground execution) */
+    int status = 0;
+    process_waitpid((uint32_t)pid, &status);
+}
+
+static uint32_t parse_hex(const char *s) {
+    uint32_t v = 0;
+    if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) s += 2;
+    while (*s) {
+        char c = *s++;
+        uint32_t d;
+        if (c >= '0' && c <= '9') d = c - '0';
+        else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
+        else if (c >= 'A' && c <= 'F') d = c - 'A' + 10;
+        else break;
+        v = (v << 4) | d;
+    }
+    return v;
+}
+
+static uint32_t parse_dec(const char *s) {
+    uint32_t v = 0;
+    while (*s >= '0' && *s <= '9') {
+        v = v * 10 + (*s - '0');
+        s++;
+    }
+    return v;
+}
+
+static void cmd_hexdump(int argc, char **argv) {
+    if (argc < 2) {
+        kprintf("Usage: hexdump <hexaddr> [count]\n");
+        return;
+    }
+    uint32_t addr = parse_hex(argv[1]);
+    uint32_t n = (argc > 2) ? parse_dec(argv[2]) : 128;
+
+    uint32_t *pd = task_current_pd();
+    for (uint32_t off = 0; off < n; off += 16) {
+        uint32_t row = addr + off;
+        uint32_t page = row & ~(PAGE_SIZE - 1);
+        if (pd && vmm_get_physical_in(pd, page) == 0) {
+            kprintf("%x: <unmapped>\n", row);
+            /* Skip to next page boundary */
+            uint32_t skip = PAGE_SIZE - (row - page);
+            if (skip > n - off) break;
+            off += skip - 16;
+            continue;
+        }
+        kprintf("%x: ", row);
+        uint32_t line = 16;
+        if (off + line > n) line = n - off;
+        for (uint32_t i = 0; i < line; i++) {
+            uint8_t b = ((uint8_t *)row)[i];
+            kprintf("%x%x ", (b >> 4) & 0xF, b & 0xF);
+        }
+        for (uint32_t i = line; i < 16; i++) kprintf("   ");
+        kprintf(" |");
+        for (uint32_t i = 0; i < line; i++) {
+            char b = ((char *)row)[i];
+            if (b >= ' ' && b < 127) kprintf("%c", b);
+            else kprintf(".");
+        }
+        kprintf("|\n");
+    }
+}
+
+static void cmd_pagemap(int argc, char **argv) {
+    if (argc < 2) {
+        kprintf("Usage: pagemap <hexaddr>\n");
+        return;
+    }
+    uint32_t va = parse_hex(argv[1]);
+    uint32_t pdi = va >> 22;
+    uint32_t pti = (va >> 12) & 0x3FF;
+    uint32_t off = va & 0xFFF;
+
+    uint32_t *pd = task_current_pd();
+    if (!pd) { kprintf("no current PD\n"); return; }
+
+    kprintf("vaddr 0x%x  pd_idx=%u  pt_idx=%u  offset=0x%x\n", va, pdi, pti, off);
+    uint32_t pde = pd[pdi];
+    kprintf("PDE[%u]=0x%x  ", pdi, pde);
+    if (!(pde & VMM_FLAG_PRESENT)) {
+        kprintf("not present\n");
+        return;
+    }
+    kprintf("{P W=%u U=%u PT=0x%x}\n",
+            (pde >> 1) & 1, (pde >> 2) & 1, pde & 0xFFFFF000);
+
+    uint32_t *pt = (uint32_t *)(pde & 0xFFFFF000);
+    uint32_t pte = pt[pti];
+    kprintf("PTE[%u]=0x%x  ", pti, pte);
+    if (!(pte & VMM_FLAG_PRESENT)) {
+        kprintf("not present\n");
+        return;
+    }
+    kprintf("{P W=%u U=%u frame=0x%x}  phys=0x%x\n",
+            (pte >> 1) & 1, (pte >> 2) & 1, pte & 0xFFFFF000,
+            (pte & 0xFFFFF000) | off);
+}
+
+static void regions_cb(uint32_t start, uint32_t len, bool used) {
+    uint32_t start_addr = start * PAGE_SIZE;
+    uint32_t end_addr   = (start + len) * PAGE_SIZE;
+    kprintf("  0x%x - 0x%x  %s  %u frames (%u KB)\n",
+            start_addr, end_addr, used ? "USED" : "FREE",
+            len, (len * PAGE_SIZE) / 1024);
+}
+
+static void cmd_regions(int argc, char **argv) {
+    (void)argc; (void)argv;
+    kprintf("PMM regions:\n");
+    pmm_region_iter(regions_cb);
 }
 
 static void cmd_mkfs(int argc, char **argv) {

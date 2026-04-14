@@ -31,6 +31,8 @@ void vga_puts(const char *s);
 void vga_set_color(uint8_t fg, uint8_t bg);
 void vga_clear(void);
 void vga_set_cursor(int row, int col);
+void vga_get_cursor(int *row, int *col);
+void vga_putchar_at(char c, int row, int col);
 void vga_backspace(void);
 
 #endif

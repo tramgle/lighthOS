@@ -5,6 +5,7 @@
 #include "drivers/vga.h"
 #include "drivers/serial.h"
 #include "drivers/keyboard.h"
+#include "drivers/console.h"
 #include "fs/vfs.h"
 
 #define LINE_MAX   256
@@ -19,13 +20,11 @@ static char history[HIST_MAX][LINE_MAX];
 static int  hist_count;
 static int  hist_pos;      /* current browse position while pressing UP/DOWN */
 
-/* Get a character from either PS/2 keyboard or serial port */
 static char shell_getchar(void) {
-    for (;;) {
-        if (keyboard_has_key()) return keyboard_getchar();
-        if (serial_has_data())  return serial_getchar();
-        __asm__ volatile ("hlt");
-    }
+    char c;
+    while (console_read(&c, 1) < 1)
+        ;
+    return c;
 }
 
 static void hist_add(const char *line) {
@@ -81,20 +80,17 @@ void shell_save_history(void) {
     struct vfs_stat st;
     if (vfs_stat("/disk", &st) != 0) return;
 
-    /* Build history as one big string */
-    char buf[HIST_MAX * LINE_MAX];
-    int pos = 0;
-    for (int i = 0; i < hist_count; i++) {
-        int len = strlen(history[i]);
-        memcpy(buf + pos, history[i], len);
-        pos += len;
-        buf[pos++] = '\n';
-    }
-
-    /* Create/overwrite the file */
+    /* Create/overwrite the file, write line-by-line to avoid large stack alloc */
     vfs_unlink(HIST_FILE);
     vfs_create(HIST_FILE, VFS_FILE);
-    vfs_write(HIST_FILE, buf, pos, 0);
+    off_t offset = 0;
+    for (int i = 0; i < hist_count; i++) {
+        int len = strlen(history[i]);
+        vfs_write(HIST_FILE, history[i], len, offset);
+        offset += len;
+        vfs_write(HIST_FILE, "\n", 1, offset);
+        offset += 1;
+    }
 }
 
 /* Clear the current line on both VGA and serial */

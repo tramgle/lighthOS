@@ -75,6 +75,14 @@ void pmm_init(multiboot_info_t *mbi) {
             }
             mmap_addr += entry->size + sizeof(entry->size);
         }
+    } else {
+        /* No mmap — assume all frames in [0, mem_end) are available.
+           The reserve loops below mark the low 1MB and the kernel/bitmap
+           region as used again. */
+        for (uint32_t frame = 0; frame < total_frames; frame++) {
+            bitmap_clear(frame);
+            used_frames--;
+        }
     }
 
     /* Reserve first 1MB (BIOS, VGA, etc.) */
@@ -100,6 +108,17 @@ void pmm_init(multiboot_info_t *mbi) {
     serial_printf("[pmm] Total: %u frames (%uMB), Used: %u, Free: %u\n",
                   total_frames, (total_frames * PAGE_SIZE) / (1024 * 1024),
                   used_frames, total_frames - used_frames);
+}
+
+void pmm_reserve_range(uint32_t start, uint32_t size) {
+    uint32_t first = start / PAGE_SIZE;
+    uint32_t last  = (start + size + PAGE_SIZE - 1) / PAGE_SIZE;
+    for (uint32_t i = first; i < last && i < total_frames; i++) {
+        if (!bitmap_test(i)) {
+            bitmap_set(i);
+            used_frames++;
+        }
+    }
 }
 
 uint32_t pmm_alloc_frame(void) {
@@ -132,4 +151,19 @@ uint32_t pmm_get_free_count(void) {
 
 uint32_t pmm_get_total_count(void) {
     return total_frames;
+}
+
+void pmm_region_iter(void (*cb)(uint32_t start_frame, uint32_t len, bool used)) {
+    if (!cb || total_frames == 0) return;
+    uint32_t run_start = 0;
+    bool run_used = bitmap_test(0);
+    for (uint32_t i = 1; i < total_frames; i++) {
+        bool used = bitmap_test(i);
+        if (used != run_used) {
+            cb(run_start, i - run_start, run_used);
+            run_start = i;
+            run_used = used;
+        }
+    }
+    cb(run_start, total_frames - run_start, run_used);
 }
