@@ -309,6 +309,76 @@ int process_fork(registers_t *parent_regs) {
     return (int)child->pid;
 }
 
+int process_execve_from_memory(registers_t *regs, const char *name,
+                               const void *elf, uint64_t size,
+                               char *const argv[]) {
+    process_t *p = process_current();
+    if (!p) return -1;
+
+    /* Validate the new image before destroying the old one. */
+    if (elf_validate(elf, size) != 0) return -1;
+
+    /* Snapshot argv before we blow away user pages. Copy strings
+       into the process's spawn buffer. */
+    const char *argv_local[SPAWN_ARGV_MAX];
+    int argc = 0;
+    char *buf = p->spawn_argv_buf;
+    uint64_t buf_used = 0;
+    if (argv) {
+        while (argv[argc] && argc < SPAWN_ARGV_MAX - 1) {
+            uint64_t len = 0;
+            while (argv[argc][len]) len++;
+            len++;
+            if (buf_used + len > SPAWN_ARGV_BUF) return -1;
+            memcpy(buf + buf_used, argv[argc], (uint32_t)len);
+            argv_local[argc] = buf + buf_used;
+            buf_used += len;
+            argc++;
+        }
+    } else {
+        argv_local[0] = name ? name : "";
+        argc = 1;
+    }
+    argv_local[argc] = 0;
+
+    /* Drop old user image in the current PML4. Kernel half (PML4
+       [256..511]) is untouched so we keep running. */
+    uint64_t *pml4 = p->task->pml4;
+    vmm_unmap_user_space(pml4);
+
+    /* Load new ELF into the same PML4. */
+    uint64_t entry = elf_load(elf, size, pml4);
+    if (!entry) return -1;
+
+    /* New user stack. */
+    for (int i = 0; i < USER_STACK_PAGES; i++) {
+        uint64_t va = USER_STACK_TOP - (i + 1) * PAGE_SIZE;
+        uint64_t frame = pmm_alloc_frame();
+        if (!frame) return -1;
+        memset(phys_to_virt_low(frame), 0, PAGE_SIZE);
+        vmm_map_in(pml4, va, frame, VMM_FLAG_WRITE | VMM_FLAG_USER);
+    }
+
+    uint64_t rsp = build_user_stack(pml4, p, argc, argv_local);
+    if (!rsp) return -1;
+
+    strncpy(p->name, name ? name : "exec", sizeof(p->name) - 1);
+
+    /* Rewrite the user-register frame so syscall return iretq's
+       into the new image. Clean SysV AMD64 entry state. */
+    regs->rip = entry;
+    regs->rsp = rsp;
+    regs->rflags = 0x202;                    /* IF=1 */
+    regs->cs = 0x1B;
+    regs->ss = 0x23;
+    regs->rax = regs->rbx = regs->rcx = regs->rdx = 0;
+    regs->rsi = regs->rdi = regs->rbp = 0;
+    regs->r8 = regs->r9 = regs->r10 = regs->r11 = 0;
+    regs->r12 = regs->r13 = regs->r14 = regs->r15 = 0;
+
+    return 0;
+}
+
 void process_list_all(void) {
     kprintf("PID  PPID  NAME\n");
     for (int i = 0; i < PROCESS_MAX; i++) {

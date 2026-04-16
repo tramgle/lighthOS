@@ -47,6 +47,15 @@ process_t *process_alloc(const char *name);
 int        process_spawn_from_memory(const char *name, const void *elf,
                                      uint64_t size, char *const argv[]);
 int        process_fork(registers_t *parent_regs);
+/* Replace the current process image with `elf` of `size` bytes.
+   Unmaps all user mappings in the current PML4, loads the new
+   binary, builds a fresh user stack + argv, and rewrites `regs`
+   so the syscall-return iretq lands at the new entry. Returns 0
+   on success (caller will iretq into new image), -1 on failure
+   (caller keeps running in old image with errno-style return). */
+int        process_execve_from_memory(registers_t *regs, const char *name,
+                                      const void *elf, uint64_t size,
+                                      char *const argv[]);
 int        process_waitpid(uint32_t pid, int *status);
 void       process_exit(int code);
 void       process_list_all(void);
