@@ -143,6 +143,13 @@ typedef struct {
 static loaded_obj_t g_libs[MAX_LIBS];
 static int          g_nlibs;
 static uint32_t     g_dyn_next = DYN_REGION_START;
+/* Main executable registered here so resolve_symbol can check it
+   first and implement global-symbol interposition. Necessary for
+   R_386_COPY semantics: library R_386_GLOB_DAT entries for a symbol
+   main also defines (via the linker-generated copy slot) must
+   resolve to main's address so library writes land in the shared
+   slot. */
+static loaded_obj_t *g_main;
 
 /* Forward decl — used before definition. */
 static int load_needed(loaded_obj_t *obj);
@@ -283,22 +290,47 @@ static int load_so(const char *path, loaded_obj_t *out) {
     return 0;
 }
 
-/* Walk loaded libraries looking for a defined symbol named `name`.
-   Returns 0 if not found. Simple linear scan — good enough for our
-   small total symbol count. */
-static uint32_t resolve_symbol(const char *name) {
-    for (int i = 0; i < g_nlibs; i++) {
-        loaded_obj_t *o = &g_libs[i];
-        if (!o->symtab || !o->strtab || !o->nsyms) continue;
-        for (uint32_t j = 0; j < o->nsyms; j++) {
-            elf32_sym_t *s = &o->symtab[j];
-            if (s->st_shndx == 0) continue;          /* undefined */
-            if (s->st_name >= o->strsz) continue;    /* garbage index */
-            const char *n = o->strtab + s->st_name;
-            if (strcmp(n, name) == 0) {
-                return o->base + s->st_value;
-            }
+/* Look up a defined symbol in a single object. Returns 0 if not
+   defined there. Used by resolve_symbol to implement main-first
+   interposition.
+   Skipping NOTYPE symbols is critical: GNU ld emits pseudo-symbols
+   into main's .dynsym for taking-the-address-of imported functions,
+   pointing at .got.plt slots (e.g. `setjmp` at the end of main's
+   .got.plt, size 0, NOTYPE). Treating these as defined for
+   interposition would make library call-through-PLT resolve to a
+   data address, crashing on the indirect jump. Only actual FUNC
+   and OBJECT definitions participate. */
+#define STT_NOTYPE 0
+#define STT_OBJECT 1
+#define STT_FUNC   2
+
+static uint32_t lookup_in(loaded_obj_t *o, const char *name) {
+    if (!o || !o->symtab || !o->strtab || !o->nsyms) return 0;
+    for (uint32_t j = 0; j < o->nsyms; j++) {
+        elf32_sym_t *s = &o->symtab[j];
+        if (s->st_shndx == 0) continue;          /* undefined */
+        if (s->st_name >= o->strsz) continue;    /* garbage index */
+        uint8_t type = s->st_info & 0xf;
+        if (type != STT_OBJECT && type != STT_FUNC) continue;
+        const char *n = o->strtab + s->st_name;
+        if (strcmp(n, name) == 0) {
+            return o->base + s->st_value;
         }
+    }
+    return 0;
+}
+
+/* Walk loaded objects looking for a defined symbol. Main executable
+   is checked first (global interposition semantics — a library
+   GLOB_DAT reloc for a symbol main also defines must resolve to
+   main's address, e.g. R_386_COPY of `environ`). Libraries searched
+   in load order. Linear scan — fine for our few hundred symbols. */
+static uint32_t resolve_symbol(const char *name) {
+    uint32_t a = lookup_in(g_main, name);
+    if (a) return a;
+    for (int i = 0; i < g_nlibs; i++) {
+        a = lookup_in(&g_libs[i], name);
+        if (a) return a;
     }
     return 0;
 }
@@ -356,19 +388,27 @@ static void apply_rel(loaded_obj_t *me, elf32_rel_t *rel, uint32_t count) {
         case R_386_COPY: {
             /* Main exec has a BSS slot reserved for a variable that
                lives in a shared library. Copy the library's initial
-               value into main's slot. Size comes from the main's
-               symbol entry (its .dynsym reports st_size after the
-               linker observed the defining library's symbol). */
+               value into main's slot. We deliberately SKIP g_main
+               during this lookup — resolve_symbol's interposition
+               semantics would return main's own slot (because main's
+               .dynsym lists this symbol as defined at its BSS slot
+               address), making the memcpy a no-op. For the copy
+               source we want the actual library definition. Size
+               comes from main's symbol entry. */
             if (!name) break;
-            uint32_t addr = resolve_symbol(name);
-            if (!addr) {
+            uint32_t src = 0;
+            for (int i = 0; i < g_nlibs; i++) {
+                src = lookup_in(&g_libs[i], name);
+                if (src) break;
+            }
+            if (!src) {
                 puts("ld.so: R_386_COPY undefined ");
                 puts(name);
                 puts("\n");
                 sys_exit(127);
             }
             uint32_t size = me->symtab[sidx].st_size;
-            memcpy(where, (void *)addr, size);
+            memcpy(where, (void *)src, size);
             break;
         }
         case R_386_NONE:
@@ -449,6 +489,107 @@ static int init_main_obj(uint32_t *phdrs, uint32_t phnum, loaded_obj_t *out) {
     return 0;
 }
 
+/* ---- dlopen / dlsym ----
+   Exposed to user code via a function-pointer table at DL_IFACE_ADDR
+   (see libulib's dlopen shim). ld.so publishes the table during
+   ld_main startup via sys_mmap_anon + pointer fill. We deliberately
+   keep this surface small: RTLD_* flags are parsed only for future
+   compatibility; we always resolve eagerly and globally. */
+
+#define DL_IFACE_ADDR 0x50000000u
+
+struct dl_ops {
+    void *(*dlopen)(const char *, int);
+    void *(*dlsym)(void *, const char *);
+    int   (*dlclose)(void *);
+    const char *(*dlerror)(void);
+};
+
+static const char *g_dl_err;
+
+static void *dl_dlopen(const char *path, int flags) {
+    (void)flags;
+    if (!path) { g_dl_err = "dlopen: null path"; return 0; }
+
+    /* Basename for already-loaded check. */
+    const char *base = path;
+    for (const char *p = path; *p; p++) if (*p == '/') base = p + 1;
+    for (int i = 0; i < g_nlibs; i++) {
+        const char *ob = g_libs[i].path;
+        for (const char *p = g_libs[i].path; *p; p++) if (*p == '/') ob = p + 1;
+        if (strcmp(ob, base) == 0) return &g_libs[i];
+    }
+
+    if (g_nlibs >= MAX_LIBS) { g_dl_err = "dlopen: too many libs"; return 0; }
+    int start = g_nlibs;
+    int idx = g_nlibs;
+    if (load_so(path, &g_libs[idx]) != 0) {
+        g_dl_err = "dlopen: load failed";
+        return 0;
+    }
+    g_nlibs++;
+    /* Pull in the new lib's DT_NEEDED recursively. */
+    load_needed(&g_libs[idx]);
+
+    /* Relocate everything we just loaded (main's symbol table is
+       checked first via resolve_symbol → interposition semantics). */
+    for (int i = start; i < g_nlibs; i++) {
+        loaded_obj_t *o = &g_libs[i];
+        if (o->rel && o->relsz)
+            apply_rel(o, o->rel, o->relsz / sizeof(elf32_rel_t));
+        if (o->jmprel && o->pltrelsz)
+            apply_rel(o, o->jmprel, o->pltrelsz / sizeof(elf32_rel_t));
+    }
+
+    g_dl_err = 0;
+    return &g_libs[idx];
+}
+
+static void *dl_dlsym(void *handle, const char *name) {
+    if (!name) { g_dl_err = "dlsym: null name"; return 0; }
+    uint32_t a;
+    if (!handle) {
+        a = resolve_symbol(name);
+    } else {
+        a = lookup_in((loaded_obj_t *)handle, name);
+    }
+    if (!a) { g_dl_err = "dlsym: not found"; return 0; }
+    g_dl_err = 0;
+    return (void *)a;
+}
+
+static int dl_dlclose(void *handle) {
+    (void)handle;
+    /* No refcounting yet — libraries stay resident until the process
+       exits. dlclose is a no-op to match API expectations. */
+    return 0;
+}
+
+static const char *dl_dlerror(void) {
+    const char *e = g_dl_err;
+    g_dl_err = 0;  /* dlerror consumes the error */
+    return e;
+}
+
+/* Install the dl_ops table at DL_IFACE_ADDR so libulib's dlopen
+   wrappers can reach us. Called once from ld_main after the main
+   exec's DT_NEEDED libraries are relocated. */
+static void install_dl_iface(void) {
+    if (sys_mmap_anon(DL_IFACE_ADDR, 4096,
+                      PROT_READ | PROT_WRITE) != (int32_t)DL_IFACE_ADDR) {
+        puts("ld.so: failed to map dl interface page\n");
+        return;
+    }
+    struct dl_ops *p = (struct dl_ops *)DL_IFACE_ADDR;
+    p->dlopen  = dl_dlopen;
+    p->dlsym   = dl_dlsym;
+    p->dlclose = dl_dlclose;
+    p->dlerror = dl_dlerror;
+    /* Leave the page RW so ld.so can still touch it; dropping to RO
+       would require tracking that we need to flip back for error-
+       string writes. */
+}
+
 /* ---- Entry ---- */
 
 uint32_t ld_main(uint32_t *stack) {
@@ -460,11 +601,13 @@ uint32_t ld_main(uint32_t *stack) {
 
     if (!at_phdr || !at_phnum || !at_entry) die("missing auxv");
 
-    /* Set up main's loaded_obj_t. */
-    loaded_obj_t main_obj;
+    /* Set up main's loaded_obj_t. Register globally so resolve_symbol
+       can interpose main's definitions over library ones. */
+    static loaded_obj_t main_obj;  /* static so g_main survives ld_main return */
     if (init_main_obj((uint32_t *)at_phdr, at_phnum, &main_obj) != 0) {
         die("main lacks PT_DYNAMIC");
     }
+    g_main = &main_obj;
 
     /* Walk main's DT_NEEDED (and each dependent's DT_NEEDED,
        transitively). Libraries are loaded into the dyn region at
@@ -495,6 +638,10 @@ uint32_t ld_main(uint32_t *stack) {
     if (main_obj.jmprel && main_obj.pltrelsz) {
         apply_rel(&main_obj, main_obj.jmprel, main_obj.pltrelsz / sizeof(elf32_rel_t));
     }
+
+    /* Publish the dlopen/dlsym table before jumping to main so the
+       process can load shared objects at runtime. */
+    install_dl_iface();
 
     return at_entry;
 }

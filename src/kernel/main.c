@@ -2,6 +2,7 @@
 #include "test/test.h"
 #endif
 #include "include/types.h"
+#include "include/io.h"
 #include "include/multiboot.h"
 #include "drivers/vga.h"
 #include "drivers/serial.h"
@@ -16,6 +17,7 @@
 #include "kernel/panic.h"
 #include "kernel/tss.h"
 #include "kernel/syscall.h"
+#include "kernel/gdbstub.h"
 #include "kernel/process.h"
 #include "mm/pmm.h"
 #include "mm/vmm.h"
@@ -67,6 +69,9 @@ void kernel_main(uint32_t magic, multiboot_info_t *mbi) {
 
     syscall_init();
     serial_printf("[boot] Syscall gate installed\n");
+
+    gdbstub_init();
+    serial_printf("[boot] GDB stub listening on COM2 (int3 to break)\n");
 
     timer_init(100);
     serial_printf("[boot] PIT timer at 100Hz\n");
@@ -232,6 +237,35 @@ void kernel_main(uint32_t magic, multiboot_info_t *mbi) {
 
     task_enable_scheduling();
 
+    /* Parse kernel cmdline for "autorun=PATH". When present, init
+       skips the shell entirely: it spawns /bin/runtests PATH, waits
+       for exit, then shuts the machine down with a matching ACPI
+       poweroff. This is the tier-3 test harness — the host just
+       waits for QEMU to exit and checks its return code + serial
+       log. No interactive stdin timing dance. */
+    char autorun_path[128];
+    autorun_path[0] = '\0';
+    if ((mbi->flags & MULTIBOOT_FLAG_CMDLINE) && mbi->cmdline) {
+        const char *cmd = (const char *)mbi->cmdline;
+        const char *p = cmd;
+        while (*p) {
+            if (p[0] == 'a' && p[1] == 'u' && p[2] == 't' && p[3] == 'o' &&
+                p[4] == 'r' && p[5] == 'u' && p[6] == 'n' && p[7] == '=') {
+                const char *v = p + 8;
+                int i = 0;
+                while (*v && *v != ' ' && i < (int)sizeof autorun_path - 1) {
+                    autorun_path[i++] = *v++;
+                }
+                autorun_path[i] = '\0';
+                break;
+            }
+            p++;
+        }
+    }
+    if (autorun_path[0]) {
+        serial_printf("[boot] autorun=%s\n", autorun_path);
+    }
+
     /* Shell selection: always /bin/shell. Installed-system boots have
        the FAT mounted at '/' so /bin/shell is the installed binary;
        ISO boots have ramfs at '/' with /bin/shell loaded from
@@ -247,8 +281,30 @@ void kernel_main(uint32_t magic, multiboot_info_t *mbi) {
                              : "Starting user shell...\n\n");
     }
 
+    /* Autorun mode: spawn /bin/runtests <PATH> and shut down on its
+       exit. No shell. Used by the deterministic test-disk harness. */
+    if (autorun_path[0]) {
+        const char *runner = "/bin/runtests";
+        struct vfs_stat rst;
+        if (vfs_stat(runner, &rst) == 0) {
+            char *argv[] = { (char *)runner, autorun_path, 0 };
+            int pid = process_spawn(runner, argv, 0);
+            if (pid >= 0) {
+                int status = 0;
+                process_waitpid((uint32_t)pid, &status);
+                serial_printf("[autorun] runtests exited with %d; shutting down\n",
+                              status);
+                __asm__ volatile ("cli");
+                outw(0x604, 0x2000);   /* QEMU ACPI poweroff */
+                outw(0xB004, 0x2000);  /* older QEMU fallback */
+                for (;;) __asm__ volatile ("hlt");
+            }
+        }
+        kprintf("autorun: runtests missing, falling through to shell\n");
+    }
+
     if (shell_path) {
-        int pid = process_spawn(shell_path, 0);
+        int pid = process_spawn(shell_path, 0, 0);
         if (pid >= 0) {
             serial_printf("[init] Spawned %s as pid %d\n", shell_path, pid);
             /* Wait for shell to exit, then respawn (init loop) */
@@ -256,7 +312,7 @@ void kernel_main(uint32_t magic, multiboot_info_t *mbi) {
                 int status;
                 process_waitpid((uint32_t)pid, &status);
                 serial_printf("[init] Shell exited with %d, respawning...\n", status);
-                pid = process_spawn(shell_path, 0);
+                pid = process_spawn(shell_path, 0, 0);
                 if (pid < 0) break;
             }
         }

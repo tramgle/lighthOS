@@ -38,6 +38,8 @@ typedef struct {
 
 #define SPAWN_ARGV_MAX 16
 #define SPAWN_ARGV_BUF 512
+#define SPAWN_ENVP_MAX 32
+#define SPAWN_ENVP_BUF 1024
 
 typedef struct process {
     uint32_t     pid;
@@ -65,6 +67,13 @@ typedef struct process {
     int          spawn_argc;
     uint32_t     spawn_argv_off[SPAWN_ARGV_MAX];
     char         spawn_argv_buf[SPAWN_ARGV_BUF];
+    /* Environment passed via SYS_SPAWN/SYS_EXECVE. Snapshotted like
+       argv so back-to-back spawns don't race. When the caller passes
+       envp=NULL the kernel inherits the current process's environ
+       snapshot. */
+    int          spawn_envc;
+    uint32_t     spawn_envp_off[SPAWN_ENVP_MAX];
+    char         spawn_envp_buf[SPAWN_ENVP_BUF];
     /* User-space signal handlers. Entry value: 0 = SIG_DFL (default
        action — terminate on SIGINT, ignore on SIGCHLD-style signals
        we don't yet model), 1 = SIG_IGN (silently drop), anything else
@@ -171,7 +180,8 @@ void       process_strip_root_prefix(char *buf, const char *root);
    caller can attach its own task_alloc'd task with a custom stack. */
 process_t *process_alloc(const char *name);
 int        process_fork(registers_t *parent_regs);
-int        process_execve(registers_t *regs, const char *path, char *const argv[]);
+int        process_execve(registers_t *regs, const char *path,
+                          char *const argv[], char *const envp[]);
 process_t *process_current(void);
 process_t *process_get(uint32_t pid);
 void       process_exit(int code);
@@ -182,7 +192,8 @@ void       process_list_all(void);
    and argv[0]=path). Strings are snapshotted into kernel memory before
    scheduling so the new task can read them after the parent's memory
    is no longer accessible. */
-int        process_spawn(const char *path, char *const argv[]);
+int        process_spawn(const char *path, char *const argv[],
+                         char *const envp[]);
 /* Fill `out` with the idx-th live process. Returns 0 on success, -1 when
    idx is past the last live entry. */
 int        process_info(uint32_t idx, proc_info_t *out);

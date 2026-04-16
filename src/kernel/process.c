@@ -637,12 +637,23 @@ static uint32_t setup_user_stack(uint32_t stack_top, process_t *p) {
 
     int argc = p->spawn_argc;
     if (argc > SPAWN_ARGV_MAX) argc = SPAWN_ARGV_MAX;
+    int envc = p->spawn_envc;
+    if (envc > SPAWN_ENVP_MAX) envc = SPAWN_ENVP_MAX;
     int has_auxv = (p->interp_entry != 0);
 
-    /* Phase 1: copy argv strings to the top of the stack, capture
-       their user-visible addresses for the argv pointer array. */
+    /* Phase 1: copy argv + envp strings to the top of the stack,
+       capturing their user-visible addresses for the pointer arrays. */
     uint32_t argv_str_ptrs[SPAWN_ARGV_MAX + 1];
+    uint32_t envp_str_ptrs[SPAWN_ENVP_MAX + 1];
     uint32_t sp = stack_top;
+    for (int i = envc - 1; i >= 0; i--) {
+        const char *s = p->spawn_envp_buf + p->spawn_envp_off[i];
+        uint32_t len = strlen(s) + 1;
+        sp -= len;
+        memcpy((void *)sp, s, len);
+        envp_str_ptrs[i] = sp;
+    }
+    envp_str_ptrs[envc] = 0;
     for (int i = argc - 1; i >= 0; i--) {
         const char *s = p->spawn_argv_buf + p->spawn_argv_off[i];
         uint32_t len = strlen(s) + 1;
@@ -653,14 +664,16 @@ static uint32_t setup_user_stack(uint32_t stack_top, process_t *p) {
     argv_str_ptrs[argc] = 0;
     sp &= ~3u;
 
-    /* Phase 2: info block, written bottom-up from a single computed
-       base. Size: argc(4) + argv+null((argc+1)*4) + envp null(4) +
-       auxv(2*4*N). N = 7 (PHDR/PHENT/PHNUM/BASE/ENTRY/PAGESZ/NULL)
-       when dynamic, else 1 (AT_NULL alone). */
+    /* Phase 2: info block, written bottom-up. Layout:
+         argc
+         argv[0..argc-1], NULL
+         envp[0..envc-1], NULL
+         auxv pairs ending in AT_NULL, 0
+       Size = 4 (argc) + (argc+1)*4 + (envc+1)*4 + 2*4*auxv_entries. */
     uint32_t auxv_entries = has_auxv ? 7 : 1;
     uint32_t info_bytes = 4
                         + (uint32_t)(argc + 1) * 4
-                        + 4
+                        + (uint32_t)(envc + 1) * 4
                         + auxv_entries * 8;
     sp -= info_bytes;
     sp &= ~3u;
@@ -670,7 +683,8 @@ static uint32_t setup_user_stack(uint32_t stack_top, process_t *p) {
     info[idx++] = (uint32_t)argc;
     for (int i = 0; i < argc; i++) info[idx++] = argv_str_ptrs[i];
     info[idx++] = 0;  /* argv terminator */
-    info[idx++] = 0;  /* envp terminator (no environment yet) */
+    for (int i = 0; i < envc; i++) info[idx++] = envp_str_ptrs[i];
+    info[idx++] = 0;  /* envp terminator */
     if (has_auxv) {
         info[idx++] = AT_PHDR;   info[idx++] = p->main_phdr_vaddr;
         info[idx++] = AT_PHENT;  info[idx++] = sizeof(elf32_phdr_t);
@@ -755,26 +769,70 @@ static uint32_t load_interp(const char *path, uint32_t *pd) {
     return entry;
 }
 
-static void snapshot_argv_into(process_t *p, const char *path, char *const argv[]) {
-    p->spawn_argc = 0;
+/* Generic string-list snapshotter. Copies a NULL-terminated vector
+   of C strings (argv or envp) into a flat buffer, recording each
+   string's offset. `*out_count` receives the number of strings
+   written (bounded by max_strings and the buffer capacity). */
+static void snapshot_strings(char *const src[],
+                             char *buf, uint32_t buf_size,
+                             uint32_t *off_arr, int max_strings,
+                             int *out_count) {
     uint32_t used = 0;
+    int count = 0;
+    if (src) {
+        for (int i = 0; src[i] && count < max_strings; i++) {
+            uint32_t len = strlen(src[i]) + 1;
+            if (used + len > buf_size) break;  /* truncate */
+            off_arr[count] = used;
+            memcpy(buf + used, src[i], len);
+            used += len;
+            count++;
+        }
+    }
+    *out_count = count;
+}
 
-    /* If caller didn't supply an argv, synthesize one containing just
-       the program path so main always sees argc >= 1. */
+static void snapshot_argv_into(process_t *p, const char *path, char *const argv[]) {
+    /* Synthesize a one-element fallback ({path, NULL}) so main always
+       sees argc >= 1 even when the caller doesn't care about argv. */
     char *const fallback_argv[] = { (char *)path, NULL };
     char *const *src = (argv && argv[0]) ? argv : fallback_argv;
+    snapshot_strings(src, p->spawn_argv_buf, SPAWN_ARGV_BUF,
+                     p->spawn_argv_off, SPAWN_ARGV_MAX, &p->spawn_argc);
+}
 
-    for (int i = 0; src[i] && p->spawn_argc < SPAWN_ARGV_MAX; i++) {
-        uint32_t len = strlen(src[i]) + 1;
-        if (used + len > SPAWN_ARGV_BUF) break;  /* truncate */
-        p->spawn_argv_off[p->spawn_argc] = used;
-        memcpy(p->spawn_argv_buf + used, src[i], len);
-        used += len;
-        p->spawn_argc++;
+/* When envp is NULL, inherit the current process's snapshot (itself
+   captured at its own spawn/execve). This matches POSIX execve-with-
+   NULL-envp semantics: child inherits parent's environment. */
+static void snapshot_envp_into(process_t *p, char *const envp[]) {
+    if (envp) {
+        snapshot_strings(envp, p->spawn_envp_buf, SPAWN_ENVP_BUF,
+                         p->spawn_envp_off, SPAWN_ENVP_MAX,
+                         &p->spawn_envc);
+        return;
+    }
+    process_t *parent = process_current();
+    if (parent && parent != p && parent->spawn_envc > 0) {
+        int n = parent->spawn_envc;
+        if (n > SPAWN_ENVP_MAX) n = SPAWN_ENVP_MAX;
+        uint32_t used = 0;
+        int count = 0;
+        for (int i = 0; i < n; i++) {
+            const char *s = parent->spawn_envp_buf + parent->spawn_envp_off[i];
+            uint32_t len = strlen(s) + 1;
+            if (used + len > SPAWN_ENVP_BUF) break;
+            p->spawn_envp_off[count] = used;
+            memcpy(p->spawn_envp_buf + used, s, len);
+            used += len;
+            count++;
+        }
+        p->spawn_envc = count;
+    } else {
+        p->spawn_envc = 0;
     }
 }
 
-int process_spawn(const char *path, char *const argv[]) {
+int process_spawn(const char *path, char *const argv[], char *const envp[]) {
     /* Read the ELF from the VFS */
     struct vfs_stat st;
     if (vfs_stat(path, &st) != 0) {
@@ -866,6 +924,7 @@ int process_spawn(const char *path, char *const argv[]) {
     proc->interp_base     = has_interp ? INTERP_BASE : 0;
     proc->interp_entry    = interp_entry;
     snapshot_argv_into(proc, path, argv);
+    snapshot_envp_into(proc, envp);
 
     /* Bind the freshly loaded address space to the new task. The next
        schedule() tick into this task will `mov cr3, child_pd`, making
@@ -983,17 +1042,28 @@ int process_fork(registers_t *parent_regs) {
 
 /* ---- Execve ---- */
 
-int process_execve(registers_t *regs, const char *path, char *const argv[]) {
+int process_execve(registers_t *regs, const char *path,
+                   char *const argv[], char *const envp[]) {
     process_t *p = process_current();
     if (!p) return -1;
 
-    /* Snapshot path + argv into kernel buffers before we rip up the
-       caller's address space. Store into *our own* process_t — execve
-       replaces the current image so argv lives on `p` itself. */
+    /* Snapshot path + argv + envp into kernel buffers before we rip up
+       the caller's address space. Store into *our own* process_t —
+       execve replaces the current image so argv/envp live on `p`.
+       Envp snapshot must happen before we overwrite the old one: if
+       the caller passes envp=NULL, snapshot_envp_into falls back to
+       the parent's snapshot, which for execve IS us. Copy locally
+       first to preserve that. */
     char kpath[VFS_MAX_PATH];
     strncpy(kpath, path, VFS_MAX_PATH - 1);
     kpath[VFS_MAX_PATH - 1] = '\0';
+
     snapshot_argv_into(p, kpath, argv);
+    /* If caller passed NULL envp, keep the pre-execve snapshot
+       (POSIX inherit-env semantics). Otherwise overwrite with the
+       explicit list. snapshot_envp_into's NULL path assumes
+       parent != p, which isn't true here. */
+    if (envp) snapshot_envp_into(p, envp);
 
     /* Signal handlers were registered against the OLD image's address
        space — the new image won't have the same functions. Reset all

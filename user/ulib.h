@@ -33,4 +33,29 @@ typedef void (*sighandler_t)(int);
    uncatchable signal (SIG_KILL, SIG_STOP). */
 sighandler_t signal(int signo, sighandler_t handler);
 
+/* SysV environment. `environ` is populated by crt0 from the stack
+   on entry; getenv/setenv/unsetenv walk and mutate it. First write
+   via setenv/unsetenv switches `environ` to a local backing array
+   so mutation doesn't scribble on the initial stack storage. */
+extern char **environ;
+char *getenv(const char *name);
+int   setenv(const char *name, const char *value, int overwrite);
+int   unsetenv(const char *name);
+
+/* Runtime loading. dlopen loads a shared object at a fresh base,
+   applies relocations, and returns an opaque handle; dlsym looks up
+   a named symbol, with handle=NULL meaning "search everything
+   already loaded" (global). dlclose is a no-op stub for now — we
+   don't track reference counts, so objects stay resident until
+   process exit. Backed by a function table that ld-vibeos.so.1
+   publishes at DL_IFACE_ADDR during startup. */
+#define RTLD_LAZY    0x1   /* Accepted but ignored — we always resolve eagerly. */
+#define RTLD_NOW     0x2
+#define RTLD_GLOBAL  0x4   /* Always-on for our symbol lookup. */
+
+void       *dlopen(const char *path, int flags);
+void       *dlsym(void *handle, const char *name);
+int         dlclose(void *handle);
+const char *dlerror(void);
+
 #endif

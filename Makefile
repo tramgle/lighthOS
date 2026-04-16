@@ -66,7 +66,7 @@ $(ISO): $(KERNEL_BIN) grub.cfg user-programs etc/fstab
 	@# get staged as multiboot modules with /lib/ paths so the kernel
 	@# module loader drops them at /lib/<name>.
 	@mkdir -p build/iso/boot/lib
-	@for so in ld-vibeos.so.1 libulib.so.1 libvibc.so.1; do \
+	@for so in ld-vibeos.so.1 libulib.so.1 libvibc.so.1 libtestdl.so.1; do \
 		if [ -f $(SYSROOT_LIB)/$$so ]; then \
 			cp $(SYSROOT_LIB)/$$so build/iso/boot/lib/$$so; \
 		fi; \
@@ -101,6 +101,8 @@ $(DISK_IMG): user-programs
 	      $(SYSROOT_LIB)/libulib.so.1 ::LIB/libulib.so.1
 	mcopy -i $@@@$$(($(DISK_FAT_OFFSET)*512)) -D o \
 	      $(SYSROOT_LIB)/libvibc.so.1 ::LIB/libvibc.so.1
+	mcopy -i $@@@$$(($(DISK_FAT_OFFSET)*512)) -D o \
+	      $(SYSROOT_LIB)/libtestdl.so.1 ::LIB/libtestdl.so.1
 	@echo "$@ ready ($(DISK_SIZE_MB) MB, FAT32)"
 	@# No /etc/fstab on the disk: the kernel's built-in defaults
 	@# mount this partition at '/' directly. A user-written /etc/fstab
@@ -129,6 +131,19 @@ run-vga: iso-ready
 debug: iso-ready
 	qemu-system-i386 -cdrom $(ISO) -nographic -m 128M \
 		-d int,cpu_reset -no-reboot -no-shutdown
+
+# run-gdb: boot the ISO with the kernel's gdb stub exposed on COM2
+# as tcp::1234. Connect from another shell with:
+#   i686-elf-gdb build/vibeos.bin -ex 'target remote localhost:1234'
+# The kernel drops into the stub on any int3 (kernel or user).
+# Insert breakpoints by adding `gdb_break();` in kernel source or via
+# gdb's `break *0xADDR` (software int3 patched at runtime).
+run-gdb: iso-ready $(DISK_IMG)
+	qemu-system-i386 -cdrom $(ISO) -drive file=$(DISK_IMG),format=raw,if=ide \
+		-m 128M -nographic \
+		-serial mon:stdio \
+		-serial tcp::1234,server,nowait \
+		-no-reboot
 
 iso-ready:
 	@if [ ! -f $(ISO) ]; then \
@@ -214,7 +229,7 @@ STATIC_USER  = hello install runtests echo
 DYNAMIC_USER = shell vi bomb fork_test free regions pagemap hexdump \
                lsblk test_badptr cat cp mv touch head tail wc \
                grep find assert chroot ls sigtest sleep mount umount \
-               alarmtest strace mmaptest
+               alarmtest strace mmaptest env envtest dlopentest
 SIMPLE_USER  = $(STATIC_USER) $(DYNAMIC_USER)
 SIMPLE_USER_TARGETS  = $(addprefix $(BUILD_USER)/,$(SIMPLE_USER))
 STATIC_USER_TARGETS  = $(addprefix $(BUILD_USER)/,$(STATIC_USER))
@@ -225,7 +240,8 @@ user-programs: $(SIMPLE_USER_TARGETS) \
                $(BUILD_USER)/dynhello $(BUILD_USER)/dyn_echo \
                $(SYSROOT_LIB)/ld-vibeos.so.1 \
                $(SYSROOT_LIB)/libulib.so.1 \
-               $(SYSROOT_LIB)/libvibc.so.1
+               $(SYSROOT_LIB)/libvibc.so.1 \
+               $(SYSROOT_LIB)/libtestdl.so.1
 
 $(BUILD_USER)/crt0.o: user/crt0.s
 	@mkdir -p $(dir $@)
@@ -296,6 +312,19 @@ $(SYSROOT_LIB)/libulib.so.1: $(BUILD_USER)/ulib.pic.o
 	@# default. Removing this would force `-l:libulib.so.1` at link time.
 	@ln -sf libulib.so.1 $(SYSROOT_LIB)/libulib.so
 
+# libtestdl.so.1: smallest-possible shared object — two trivial
+# function exports, no libulib dependency. Used by /bin/dlopentest to
+# exercise the ld-vibeos.so.1 dlopen/dlsym path.
+user/libtestdl/libtestdl.pic.o: user/libtestdl/libtestdl.c
+	$(CC) $(USER_CFLAGS_PIC) -c $< -o $@
+
+$(SYSROOT_LIB)/libtestdl.so.1: user/libtestdl/libtestdl.pic.o
+	@mkdir -p $(dir $@)
+	$(CC) -nostdlib -ffreestanding \
+	      -Wl,-shared -Wl,-soname,libtestdl.so.1 \
+	      -Wl,-z,max-page-size=0x1000 \
+	      -o $@ user/libtestdl/libtestdl.pic.o -lgcc
+
 # libvibc.so.1: shared-object form of the subset libc. Declares a
 # run-time dependency on libulib.so.1 (for strlen/memcpy/sys_*).
 # The -L / -lulib bits aren't consumed for symbol copy-in (it's a
@@ -353,13 +382,19 @@ $(DYNAMIC_USER_TARGETS): $(BUILD_USER)/%: $(BUILD_USER)/crt0.o $(BUILD_USER)/%.o
 	      -o $@ $(BUILD_USER)/crt0.o $(BUILD_USER)/$*.o \
 	      -L$(SYSROOT_LIB) -lulib -lgcc
 
-# Binaries that need libvibc (libc_test + lua). Forced static so the
-# .so symlinks in $(SYSROOT_LIB) don't pull the dynamic forms in.
+# Binaries that need libvibc (libc_test + lua) — now dynamic too.
+# Resolving symbols through ld-vibeos.so.1 at load time means lua's
+# 226 KB of libvibc + libulib duplication goes away in favor of
+# a shared copy in /lib/.
 $(BUILD_USER)/libc_test: $(BUILD_USER)/crt0.o $(BUILD_USER)/libc_test.o \
-                         $(SYSROOT_LIB)/libvibc.a $(SYSROOT_LIB)/libulib.a
+                         $(SYSROOT_LIB)/libvibc.so.1 $(SYSROOT_LIB)/libulib.so.1
 	@mkdir -p $(dir $@)
-	$(CC) $(USER_LDFLAGS) -o $@ $(BUILD_USER)/crt0.o $(BUILD_USER)/libc_test.o \
-	      -Wl,-Bstatic -L$(SYSROOT_LIB) -lvibc -lulib -Wl,-Bdynamic
+	$(CC) -T user/user.ld -nostdlib -ffreestanding \
+	      -Wl,--dynamic-linker=/lib/ld-vibeos.so.1 \
+	      -Wl,--no-as-needed \
+	      -Wl,-rpath-link,$(SYSROOT_LIB) \
+	      -o $@ $(BUILD_USER)/crt0.o $(BUILD_USER)/libc_test.o \
+	      -L$(SYSROOT_LIB) -lvibc -lulib -lgcc
 
 build/lua/linit_vibeos.o: user/linit_vibeos.c $(SYSROOT_HDRS)
 	@mkdir -p $(dir $@)
@@ -371,11 +406,15 @@ build/lua/lua_main.o: user/lua_main.c $(SYSROOT_HDRS)
 
 $(BUILD_USER)/lua: $(BUILD_USER)/crt0.o $(LUA_OBJS) \
                    build/lua/linit_vibeos.o build/lua/lua_main.o \
-                   $(SYSROOT_LIB)/libvibc.a $(SYSROOT_LIB)/libulib.a
+                   $(SYSROOT_LIB)/libvibc.so.1 $(SYSROOT_LIB)/libulib.so.1
 	@mkdir -p $(dir $@)
-	$(CC) $(USER_LDFLAGS) -o $@ $(BUILD_USER)/crt0.o $(LUA_OBJS) \
+	$(CC) -T user/user.ld -nostdlib -ffreestanding \
+	      -Wl,--dynamic-linker=/lib/ld-vibeos.so.1 \
+	      -Wl,--no-as-needed \
+	      -Wl,-rpath-link,$(SYSROOT_LIB) \
+	      -o $@ $(BUILD_USER)/crt0.o $(LUA_OBJS) \
 	      build/lua/linit_vibeos.o build/lua/lua_main.o \
-	      -Wl,-Bstatic -L$(SYSROOT_LIB) -lvibc -lulib -Wl,-Bdynamic
+	      -L$(SYSROOT_LIB) -lvibc -lulib -lgcc
 
 # Dynamic binaries: link against libulib.so.1, record PT_INTERP, and
 # let ld-vibeos.so.1 resolve symbols at load time. Keeps the same
@@ -523,12 +562,20 @@ test-disk:
 	  exit 1; \
 	fi
 	@mkdir -p build
-	@(sleep 2; printf 'runtests /tests\n'; sleep 45; printf 'shutdown\n'; sleep 2) \
-	  | timeout 90 qemu-system-i386 -cdrom build/vibeos-test.iso \
-	      -drive file=$(DISK_IMG),format=raw,if=ide -nographic -m 128M \
+	@# Tier-3 harness: the kernel sees `autorun=/tests` on its
+	@# cmdline (set in grub-test.cfg) and spawns /bin/runtests itself,
+	@# then ACPI-shuts-down on exit. No stdin dance, no sleep-45
+	@# timing assumption. Redirect stdin from /dev/null so nothing
+	@# can keep qemu alive.
+	@timeout 90 qemu-system-i386 -cdrom build/vibeos-test.iso \
+	      -drive file=$(DISK_IMG),format=raw,if=ide \
+	      -nographic -m 128M </dev/null \
 	  | tee build/test-output.log >/dev/null
-	@if grep -qE '^FAIL|, [1-9][0-9]* FAIL' build/test-output.log; then \
-	  grep -E '^(=== |PASS|FAIL)' build/test-output.log; \
+	@# Fail if any FAIL lines appear, the summary is missing
+	@# (autorun didn't finish), or a kernel panic fired.
+	@if grep -qE '^FAIL|, [1-9][0-9]* FAIL|KERNEL PANIC' build/test-output.log \
+	   || ! grep -qE '=== Summary:' build/test-output.log; then \
+	  grep -E '^(=== |PASS|FAIL|Exception|KERNEL PANIC)' build/test-output.log; \
 	  echo "TEST FAILURES"; exit 1; \
 	else \
 	  grep -E '^(=== |PASS|FAIL)' build/test-output.log; \

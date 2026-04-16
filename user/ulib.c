@@ -192,6 +192,124 @@ static void _ulib_sig_thunk(int signo) {
     sys_sigreturn();  /* never returns */
 }
 
+/* ---- Environment variables ------------------------------------
+   `environ` is set by crt0 from the SysV stack. Reading (getenv)
+   walks it verbatim. First mutation (setenv/unsetenv) copies the
+   pointer array into our own fixed-size backing slot so we can
+   modify it without touching the initial stack storage — the
+   original stack-resident envp is logically read-only. */
+
+char **environ;
+
+#define ENV_POOL_SIZE 4096
+#define ENV_MAX       64
+
+static char *env_backing[ENV_MAX];
+static int   env_backing_live;
+static char  env_pool[ENV_POOL_SIZE];
+static int   env_pool_used;
+
+static void env_adopt(void) {
+    if (env_backing_live) return;
+    int i = 0;
+    if (environ) {
+        for (; environ[i] && i < ENV_MAX - 1; i++) env_backing[i] = environ[i];
+    }
+    env_backing[i] = 0;
+    environ = env_backing;
+    env_backing_live = 1;
+}
+
+char *getenv(const char *name) {
+    if (!name || !environ) return 0;
+    size_t nlen = strlen(name);
+    for (int i = 0; environ[i]; i++) {
+        char *e = environ[i];
+        if (strncmp(e, name, nlen) == 0 && e[nlen] == '=') {
+            return e + nlen + 1;
+        }
+    }
+    return 0;
+}
+
+int setenv(const char *name, const char *value, int overwrite) {
+    if (!name || !value || !*name) return -1;
+    for (const char *p = name; *p; p++) if (*p == '=') return -1;
+    env_adopt();
+
+    size_t nlen = strlen(name);
+    int slot = -1;
+    for (int i = 0; environ[i]; i++) {
+        if (strncmp(environ[i], name, nlen) == 0 && environ[i][nlen] == '=') {
+            if (!overwrite) return 0;
+            slot = i; break;
+        }
+    }
+
+    size_t vlen = strlen(value);
+    size_t need = nlen + 1 + vlen + 1;
+    if ((size_t)env_pool_used + need > sizeof env_pool) return -1;
+    char *dst = env_pool + env_pool_used;
+    env_pool_used += (int)need;
+    memcpy(dst, name, nlen);
+    dst[nlen] = '=';
+    memcpy(dst + nlen + 1, value, vlen);
+    dst[nlen + 1 + vlen] = '\0';
+
+    if (slot >= 0) {
+        environ[slot] = dst;
+    } else {
+        int n = 0;
+        while (environ[n]) n++;
+        if (n >= ENV_MAX - 1) return -1;
+        environ[n] = dst;
+        environ[n + 1] = 0;
+    }
+    return 0;
+}
+
+int unsetenv(const char *name) {
+    if (!name || !environ) return 0;
+    env_adopt();
+    size_t nlen = strlen(name);
+    for (int i = 0; environ[i]; i++) {
+        if (strncmp(environ[i], name, nlen) == 0 && environ[i][nlen] == '=') {
+            int j = i;
+            while (environ[j + 1]) { environ[j] = environ[j + 1]; j++; }
+            environ[j] = 0;
+            return 0;
+        }
+    }
+    return 0;
+}
+
+/* ---- dlopen / dlsym wrappers ----
+   Thin forwarders into ld-vibeos.so.1's function table, published
+   at DL_IFACE_ADDR by the interpreter on startup. Layout must stay
+   in sync with user/ldso/ld_main.c — if either changes, both move. */
+
+#define DL_IFACE_ADDR 0x50000000u
+
+struct _dl_ops {
+    void *(*dlopen)(const char *, int);
+    void *(*dlsym)(void *, const char *);
+    int   (*dlclose)(void *);
+    const char *(*dlerror)(void);
+};
+
+void *dlopen(const char *path, int flags) {
+    return ((struct _dl_ops *)DL_IFACE_ADDR)->dlopen(path, flags);
+}
+void *dlsym(void *handle, const char *name) {
+    return ((struct _dl_ops *)DL_IFACE_ADDR)->dlsym(handle, name);
+}
+int dlclose(void *handle) {
+    return ((struct _dl_ops *)DL_IFACE_ADDR)->dlclose(handle);
+}
+const char *dlerror(void) {
+    return ((struct _dl_ops *)DL_IFACE_ADDR)->dlerror();
+}
+
 sighandler_t signal(int signo, sighandler_t handler) {
     if (signo < 0 || signo >= NSIG_USER) return SIG_ERR;
     sighandler_t prev = _user_sighandlers[signo];

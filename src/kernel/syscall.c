@@ -315,17 +315,18 @@ static registers_t *syscall_dispatch(registers_t *regs) {
 
     case SYS_EXECVE: {
         USER_PATH(regs->ebx, upath);
-        /* argv is validated inside process_execve's snapshot loop
-           — it walks char *const * and calls strlen on each entry.
-           That loop should itself use the user-safe helpers, but for
-           now we pre-validate the argv pointer block lightly: a NULL
-           argv is fine; non-NULL must be in user space. */
+        /* argv + envp are walked by process_execve's snapshot loop —
+           it does its own strlen-per-entry. Pre-validate only that
+           the top-level pointers are in user space when non-NULL.
+           envp arrives in edx: 0 = inherit from current. */
         if (regs->ecx) USER_STRUCT_OK(regs->ecx, void *, 0);
+        if (regs->edx) USER_STRUCT_OK(regs->edx, void *, 0);
         char rp[VFS_MAX_PATH];
         if (process_resolve_path(upath, rp, sizeof rp) != 0) {
             regs->eax = (uint32_t)-1; return regs;
         }
-        int rc = process_execve(regs, rp, (char *const *)regs->ecx);
+        int rc = process_execve(regs, rp, (char *const *)regs->ecx,
+                                (char *const *)regs->edx);
         if (rc != 0) regs->eax = (uint32_t)-1;
         return regs;
     }
@@ -333,11 +334,14 @@ static registers_t *syscall_dispatch(registers_t *regs) {
     case SYS_SPAWN: {
         USER_PATH(regs->ebx, upath);
         if (regs->ecx) USER_STRUCT_OK(regs->ecx, void *, 0);
+        if (regs->edx) USER_STRUCT_OK(regs->edx, void *, 0);
         char rp[VFS_MAX_PATH];
         if (process_resolve_path(upath, rp, sizeof rp) != 0) {
             regs->eax = (uint32_t)-1; return regs;
         }
-        regs->eax = (uint32_t)process_spawn(rp, (char *const *)regs->ecx);
+        regs->eax = (uint32_t)process_spawn(rp,
+                                            (char *const *)regs->ecx,
+                                            (char *const *)regs->edx);
         return regs;
     }
 

@@ -126,13 +126,32 @@ static inline int32_t sys_unlink(const char *path) { return _syscall1(SYS_UNLINK
 static inline int32_t sys_mkdir(const char *path) { return _syscall1(SYS_MKDIR, (uint32_t)path); }
 static inline int32_t sys_getpid(void) { return _syscall0(SYS_GETPID); }
 static inline void sys_yield(void) { _syscall0(SYS_YIELD); }
-static inline int32_t sys_spawn(const char *path, char *const argv[]) { return _syscall2(SYS_SPAWN, (uint32_t)path, (uint32_t)argv); }
+/* sys_spawn / sys_spawnve: child's envp comes from the third syscall
+   arg (edx). sys_spawn passes the caller's current `environ` so
+   in-process setenv/unsetenv propagates to the child (POSIX
+   fork+exec semantics). Use sys_spawnve for an explicit env, or
+   pass NULL explicitly to inherit the kernel's spawn-time snapshot
+   instead of user-space environ. `environ` lives in ulib. */
+extern char **environ;
+static inline int32_t sys_spawnve(const char *path, char *const argv[],
+                                  char *const envp[]) {
+    return _syscall3(SYS_SPAWN, (uint32_t)path, (uint32_t)argv, (uint32_t)envp);
+}
+static inline int32_t sys_spawn(const char *path, char *const argv[]) {
+    return sys_spawnve(path, argv, environ);
+}
 static inline int32_t sys_waitpid(uint32_t pid, int *status) { return _syscall2(SYS_WAITPID, pid, (uint32_t)status); }
 static inline int32_t sys_readdir(const char *path, uint32_t idx, char *name, uint32_t *type) { return _syscall4(SYS_READDIR, (uint32_t)path, idx, (uint32_t)name, (uint32_t)type); }
 static inline int32_t sys_chdir(const char *path) { return _syscall1(SYS_CHDIR, (uint32_t)path); }
 static inline int32_t sys_getcwd(char *buf, uint32_t size) { return _syscall2(SYS_GETCWD, (uint32_t)buf, size); }
 static inline int32_t sys_fork(void) { return _syscall0(SYS_FORK); }
-static inline int32_t sys_execve(const char *path, char *const argv[]) { return _syscall2(SYS_EXECVE, (uint32_t)path, (uint32_t)argv); }
+static inline int32_t sys_execvee(const char *path, char *const argv[],
+                                  char *const envp[]) {
+    return _syscall3(SYS_EXECVE, (uint32_t)path, (uint32_t)argv, (uint32_t)envp);
+}
+static inline int32_t sys_execve(const char *path, char *const argv[]) {
+    return sys_execvee(path, argv, environ);
+}
 
 #define PROC_NAME_MAX 32
 struct proc_info {

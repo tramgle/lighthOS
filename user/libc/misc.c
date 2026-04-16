@@ -24,7 +24,9 @@ void abort(void) {
 
 int atexit(void (*fn)(void)) { (void)fn; return 0; }
 
-char *getenv(const char *name) { (void)name; return 0; }
+/* getenv is now provided by ulib — it walks the real envp passed
+   in at process start. The old always-NULL stub lived here; libvibc
+   picks up ulib's symbol at final-link time. */
 
 int system(const char *cmd) { (void)cmd; return -1; }
 

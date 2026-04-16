@@ -38,6 +38,7 @@ typedef struct {
 } __attribute__((packed)) multiboot_mod_t;
 
 #define MULTIBOOT_MMAP_AVAILABLE 1
-#define MULTIBOOT_FLAG_MODS (1 << 3)
+#define MULTIBOOT_FLAG_CMDLINE (1 << 2)
+#define MULTIBOOT_FLAG_MODS    (1 << 3)
 
 #endif
