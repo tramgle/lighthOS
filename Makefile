@@ -91,11 +91,13 @@ DISK_IMG        = build/disk.img
 
 # x86_64-ported user binaries. Grows each time a user program is
 # brought back; replaces the legacy SIMPLE_USER set during the port.
-X64_USER        = hello forktest fstest
+X64_USER        = hello forktest fstest \
+                  runtests test_pid test_fork test_fs test_stream
 X64_USER_TARGETS = $(addprefix $(BUILD_USER)/,$(X64_USER))
 
 X64_USER_CFLAGS = -std=gnu99 -ffreestanding -O2 -Wall -Wextra -nostdlib \
-                  -mno-red-zone
+                  -mno-red-zone -mno-sse -mno-mmx -mno-sse2 \
+                  -mgeneral-regs-only -fno-stack-protector
 
 $(BUILD_USER)/crt0.o: user/crt0.s
 	@mkdir -p $(dir $@)
@@ -319,19 +321,20 @@ docker-test:
 	$(DOCKER_RUN) make test
 
 # ---- In-system test harness -----------------------------------------
-# test-iso builds build/lighthos-test.iso: production user binaries
-# PLUS each tests/*.vsh as a multiboot module whose cmdline contains
-# "tests/<name>.vsh". Kernel's module loader drops those into
-# /tests/<name>.vsh in ramfs (see src/kernel/main.c), so the
-# in-system `runtests /tests` walks them.
+# Builds build/lighthos-test.iso: the kernel + a grub.cfg entry that
+# sets autorun=/bin/runtests on the multiboot cmdline + each ported
+# test binary as a module. Kernel spawns /bin/runtests, which fork+
+# execve's each test, tallies pass/fail, prints the summary line the
+# host harness greps for, and calls sys_shutdown.
 
-TEST_VSH = $(wildcard tests/*.vsh)
-
-build/lighthos-test.iso: $(ISO) grub-test.cfg $(TEST_VSH)
-	@mkdir -p build/iso-test/boot/grub build/iso-test/boot/tests
-	@cp -r build/iso/boot/. build/iso-test/boot/
-	@cp grub-test.cfg build/iso-test/boot/grub/grub.cfg
-	@for f in $(TEST_VSH); do cp $$f build/iso-test/boot/tests/; done
+build/lighthos-test.iso: $(KERNEL_BIN) grub-test.cfg x64-userland
+	@mkdir -p build/iso-test/boot/grub
+	cp $(KERNEL_BIN) build/iso-test/boot/lighthos.bin
+	cp grub-test.cfg build/iso-test/boot/grub/grub.cfg
+	@for f in $(X64_USER_TARGETS); do \
+	    name=$$(basename $$f); \
+	    cp $$f build/iso-test/boot/$$name; \
+	done
 	grub-mkrescue -o $@ build/iso-test 2>/dev/null
 
 test-iso: build/lighthos-test.iso
@@ -339,43 +342,30 @@ test-iso: build/lighthos-test.iso
 docker-test-iso:
 	$(DOCKER_RUN) make test-iso
 
-# test-disk boots the test ISO, sends a single "runtests /tests;
-# shutdown" line so there's no in-band stdin timing dependency, and
-# checks the captured serial log for FAIL markers. Run
-# `make docker-test-iso` first to build build/lighthos-test.iso in docker
-# (host typically doesn't have grub-mkrescue).
+# test-disk boots the test ISO with autorun=/bin/runtests on its
+# cmdline. The kernel spawns runtests directly (no shell), which in
+# turn fork+execve's each test binary under /bin/, tallies results,
+# prints "=== Summary: N passed, M failed", then ACPI-shuts down.
 test-disk:
 	@if [ ! -f build/lighthos-test.iso ]; then \
 	  echo "Missing build/lighthos-test.iso — run 'make docker-test-iso' first."; \
 	  exit 1; \
 	fi
-	@if [ ! -f $(DISK_IMG) ]; then \
-	  echo "Missing $(DISK_IMG) — run 'make docker-disk' first."; \
-	  exit 1; \
-	fi
 	@mkdir -p build
-	@# Tier-3 harness: the kernel sees `autorun=/tests` on its
-	@# cmdline (set in grub-test.cfg) and spawns /bin/runtests itself,
-	@# then ACPI-shuts-down on exit. No stdin dance, no sleep-45
-	@# timing assumption. Redirect stdin from /dev/null so nothing
-	@# can keep qemu alive.
-	@timeout 90 qemu-system-x86_64 -cdrom build/lighthos-test.iso \
-	      -drive file=$(DISK_IMG),format=raw,if=ide \
-	      -nographic -m 128M </dev/null \
-	  | tee build/test-output.log >/dev/null
-	@# Fail if any FAIL lines appear, the summary is missing
-	@# (autorun didn't finish), or a kernel panic fired.
-	@if grep -qE '^FAIL|, [1-9][0-9]* FAIL|KERNEL PANIC' build/test-output.log \
+	@timeout 30 qemu-system-x86_64 -cdrom build/lighthos-test.iso \
+	      -display none -serial file:build/test-output.log -m 128M -no-reboot \
+	      -device isa-debug-exit,iobase=0x604,iosize=0x04 \
+	      </dev/null >/dev/null 2>&1; true
+	@if grep -qE '^FAIL|, [1-9][0-9]* failed|KERNEL PANIC' build/test-output.log \
 	   || ! grep -qE '=== Summary:' build/test-output.log; then \
-	  grep -E '^(=== |PASS|FAIL|Exception|KERNEL PANIC)' build/test-output.log; \
+	  grep -E '^(=== |RUN |PASS |FAIL |Exception|KERNEL PANIC)' build/test-output.log; \
 	  echo "TEST FAILURES"; exit 1; \
 	else \
-	  grep -E '^(=== |PASS|FAIL)' build/test-output.log; \
+	  grep -E '^(=== |RUN |PASS |FAIL )' build/test-output.log; \
 	  echo "ALL TESTS PASSED"; \
 	fi
 
-# One-stop test run: rebuild everything in docker, then boot on host.
-docker-test-disk: docker-test-iso docker-disk
+docker-test-disk: docker-test-iso
 	$(MAKE) test-disk
 
 docker-run: docker-build

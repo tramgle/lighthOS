@@ -31,6 +31,7 @@
 #define SYS_YIELD   24
 #define SYS_MKDIR   39
 #define SYS_FORK    57
+#define SYS_EXECVE  59
 #define SYS_READDIR 89
 #define SYS_SPAWN  120
 #define SYS_SHUTDOWN 201
@@ -100,6 +101,10 @@ static inline long sys_lseek(int fd, long off, int whence) {
     return _syscall3(SYS_LSEEK, fd, off, whence);
 }
 static inline long sys_time(void)                { return _syscall0(SYS_TIME); }
+static inline long sys_execve(const char *path, char *const argv[], char *const envp[]) {
+    return _syscall3(SYS_EXECVE, (long)(uintptr_t)path,
+                     (long)(uintptr_t)argv, (long)(uintptr_t)envp);
+}
 
 static inline size_t ustrlen(const char *s) {
     size_t n = 0; while (s[n]) n++; return n;

@@ -160,12 +160,36 @@ void kernel_main(uint32_t magic, multiboot_info_t *mbi) {
         fstab_mount_defaults();
     }
 
-    /* Pick the init path. Modules path: the first module is init.
-       Bootdisk path: the FAT root should have /bin/init (or a
-       similarly-named default). */
+    /* Parse `autorun=<path>` from the multiboot cmdline. When set,
+       the kernel spawns that path as init (instead of the first
+       module / /bin/init fallback). Used by the test-iso harness
+       so a single cmdline line picks the entry point. */
+    char autorun[VFS_MAX_PATH] = {0};
+    if ((mbi->flags & MULTIBOOT_FLAG_CMDLINE) && mbi->cmdline) {
+        const char *cmd = (const char *)phys_to_virt_low(mbi->cmdline);
+        const char *p = cmd;
+        while (*p) {
+            while (*p == ' ' || *p == '\t') p++;
+            if (!*p) break;
+            const char *tok = p;
+            while (*p && *p != ' ' && *p != '\t') p++;
+            if (p - tok > 8 && tok[0] == 'a' && tok[1] == 'u' &&
+                tok[2] == 't' && tok[3] == 'o' && tok[4] == 'r' &&
+                tok[5] == 'u' && tok[6] == 'n' && tok[7] == '=') {
+                const char *val = tok + 8;
+                int n = 0;
+                while (val < p && n < (int)sizeof(autorun) - 1) autorun[n++] = *val++;
+                autorun[n] = 0;
+            }
+        }
+    }
+
     int pid = -1;
     char *const argv[] = { (char *)"init", 0 };
-    if (have_modules) {
+    if (autorun[0]) {
+        kprintf("[main] autorun=%s\n", autorun);
+        pid = process_spawn_from_path(autorun, argv);
+    } else if (have_modules) {
         uint64_t mod_size = 0;
         void *mod = multiboot_first_module(mbi, &mod_size);
         if (mod) pid = process_spawn_from_memory("init", mod, mod_size, argv);

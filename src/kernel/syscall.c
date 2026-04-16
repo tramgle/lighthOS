@@ -12,7 +12,13 @@
 #include "lib/kprintf.h"
 #include "fs/vfs.h"
 #include "mm/vmm.h"
+#include "mm/heap.h"
 #include "drivers/serial.h"
+
+/* Thin wrappers so the SYS_EXECVE case body reads cleanly even
+   though heap.h's names don't have module-prefix namespacing. */
+static inline void *kmalloc_wrap(uint64_t n) { return kmalloc(n); }
+static inline void  kfree_wrap(void *p)      { kfree(p); }
 
 #define SYS_EXIT     1
 #define SYS_READ     3
@@ -27,6 +33,7 @@
 #define SYS_YIELD   24
 #define SYS_MKDIR   39
 #define SYS_FORK    57
+#define SYS_EXECVE  59
 #define SYS_READDIR 89
 #define SYS_SPAWN  120
 #define SYS_SHUTDOWN 201
@@ -122,6 +129,31 @@ static registers_t *syscall_handler(registers_t *regs) {
     case SYS_FORK:
         regs->rax = (uint64_t)(int64_t)process_fork(regs);
         break;
+
+    case SYS_EXECVE: {
+        /* (path, argv, envp). Reads the ELF via vfs, unmaps the
+           caller's user image, loads the new one, rewrites regs. */
+        const char *path = (const char *)(uintptr_t)a1;
+        char *const *argv = (char *const *)(uintptr_t)a2;
+        struct vfs_stat st;
+        if (vfs_stat(path, &st) != 0 || st.size == 0) {
+            regs->rax = (uint64_t)(int64_t)-1; break;
+        }
+        void *buf = kmalloc_wrap(st.size);
+        if (!buf) { regs->rax = (uint64_t)(int64_t)-1; break; }
+        ssize_t r = vfs_read(path, buf, st.size, 0);
+        if (r != (ssize_t)st.size) {
+            kfree_wrap(buf);
+            regs->rax = (uint64_t)(int64_t)-1; break;
+        }
+        int rc = process_execve_from_memory(regs, path, buf, st.size, argv);
+        kfree_wrap(buf);
+        if (rc < 0) regs->rax = (uint64_t)(int64_t)-1;
+        /* Success: regs is already rewritten — when we return, the
+           stub iretq's into the new image at entry with the fresh
+           user stack we built. */
+        break;
+    }
 
     case SYS_READDIR: {
         char name[VFS_MAX_NAME];
