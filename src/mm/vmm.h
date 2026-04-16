@@ -23,6 +23,13 @@ void     vmm_map_in(uint32_t *pd, uint32_t virt, uint32_t phys, uint32_t flags);
 void     vmm_unmap_in(uint32_t *pd, uint32_t virt);
 uint32_t vmm_get_physical_in(uint32_t *pd, uint32_t virt);
 
+/* Update the permission flag bits on an already-mapped page. The new
+   `flags` are OR'd with VMM_FLAG_PRESENT and written to the low 12
+   bits of the PTE; the physical frame is preserved. Returns 0 on
+   success, -1 if `virt` has no mapping in `pd`. Invalidates the TLB
+   for `virt` when `pd` is the live CR3. Used by SYS_MPROTECT. */
+int      vmm_set_flags_in(uint32_t *pd, uint32_t virt, uint32_t flags);
+
 /* Convenience wrappers that operate on the current task's PD (or the
    kernel PD if tasks haven't been initialised yet). */
 void     vmm_map_page(uint32_t virt, uint32_t phys, uint32_t flags);

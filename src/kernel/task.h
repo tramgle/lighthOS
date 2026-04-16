@@ -11,6 +11,7 @@ typedef enum {
     TASK_READY,
     TASK_RUNNING,
     TASK_BLOCKED,
+    TASK_STOPPED,   /* Paused by SIGSTOP; scheduler skips until SIGCONT */
     TASK_DEAD
 } task_state_t;
 

@@ -10,7 +10,6 @@
 #define SYS_CLOSE   6
 #define SYS_WAITPID 7
 #define SYS_UNLINK  10
-#define SYS_EXEC    11
 #define SYS_CHDIR   12
 #define SYS_STAT    18
 #define SYS_GETPID  20
@@ -32,6 +31,26 @@
 #define SYS_PEEK    213
 #define SYS_TIME    214
 #define SYS_BLKDEVS 215
+#define SYS_PIPE    42
+#define SYS_CHROOT  161
+#define SYS_KILL    37
+#define SYS_SETPGID 109
+#define SYS_GETPGID 108
+#define SYS_SIGNAL    48
+#define SYS_SIGRETURN 119
+#define SYS_MOUNT     21
+#define SYS_UMOUNT    22
+#define SYS_ALARM     27
+#define SYS_TRACEME     231
+#define SYS_TRACE_READ  232
+#define SYS_MMAP_ANON   9
+#define SYS_MPROTECT    125
+
+/* mmap/mprotect protection flags. PROT_EXEC is documented but not
+   enforced — our paging setup has no NX bit at the i386 level. */
+#define PROT_READ    0x1
+#define PROT_WRITE   0x2
+#define PROT_EXEC    0x4
 
 #define SYSCALL_MAX 256
 

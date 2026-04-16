@@ -11,7 +11,7 @@
 #define LINE_MAX   256
 #define ARGC_MAX   16
 #define HIST_MAX   32
-#define HIST_FILE  "/disk/.history"
+#define HIST_FILE  "/.history"
 
 static char cwd[SHELL_CWD_MAX];
 
@@ -76,11 +76,9 @@ static void hist_load(void) {
 }
 
 void shell_save_history(void) {
-    /* Only save if /disk is mounted */
-    struct vfs_stat st;
-    if (vfs_stat("/disk", &st) != 0) return;
-
-    /* Create/overwrite the file, write line-by-line to avoid large stack alloc */
+    /* Best-effort: writes to whatever fs owns '/'. If that's an
+       ephemeral ramfs (ISO-only boot), the file just doesn't
+       survive — harmless. */
     vfs_unlink(HIST_FILE);
     vfs_create(HIST_FILE, VFS_FILE);
     off_t offset = 0;

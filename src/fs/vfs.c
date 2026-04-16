@@ -9,6 +9,18 @@ void vfs_init(void) {
 }
 
 int vfs_mount(const char *path, vfs_ops_t *ops, vfs_node_t *root, void *fs_data) {
+    /* If something is already mounted at this path, detach it so the
+       new mount wins `find_mount`'s longest-prefix / first-hit match.
+       The old filesystem's in-memory nodes stay valid — we just stop
+       routing through them. Needed so the bootdisk flow can replace
+       the initial ramfs at '/' with the install FAT. */
+    for (int i = 0; i < MAX_MOUNTS; i++) {
+        if (mounts[i].in_use && strcmp(mounts[i].mount_point, path) == 0) {
+            mounts[i].in_use = false;
+            serial_printf("[vfs] Detaching existing mount at '%s'\n", path);
+        }
+    }
+
     for (int i = 0; i < MAX_MOUNTS; i++) {
         if (!mounts[i].in_use) {
             strncpy(mounts[i].mount_point, path, VFS_MAX_PATH - 1);

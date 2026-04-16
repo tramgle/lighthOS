@@ -1,6 +1,7 @@
 TARGET  = i686-elf
 CC      = $(TARGET)-gcc
 AS      = nasm
+AR      = $(TARGET)-ar
 LD      = $(TARGET)-gcc
 
 DEBUG_KERNEL ?= 0
@@ -21,7 +22,16 @@ OBJECTS   = $(C_OBJECTS) $(S_OBJECTS)
 KERNEL_BIN = build/vibeos.bin
 ISO        = build/vibeos.iso
 
-.PHONY: all clean iso run run-disk run-vga debug docker-build docker-run test docker-test iso-ready user-programs fix-perms docker-lua-compile bootdisk run-bootdisk docker-bootdisk patch-disk refresh-bootdisk
+# All build artifacts live under build/ so `.gitignore` can stay a
+# single `build/` line and `make clean` is `rm -rf build`. Source
+# files (user/*.c/h/s/ld, user/libc/**, user/ldso/**) stay in
+# user/; nothing new is ever written there by the build.
+BUILD_USER      = build/user
+BUILD_USER_LIBC = build/user/libc
+BUILD_USER_LDSO = build/user/ldso
+DISK_IMG        = build/disk.img
+
+.PHONY: all clean iso run run-disk run-vga debug docker-build docker-run test docker-test iso-ready user-programs fix-perms docker-lua-compile bootdisk run-bootdisk docker-bootdisk docker-disk test-iso docker-test-iso test-disk docker-test-disk run-installed
 
 all: $(ISO)
 
@@ -37,51 +47,79 @@ build/%.o: src/%.s
 	@mkdir -p $(dir $@)
 	$(AS) $(ASFLAGS) $< -o $@
 
-$(ISO): $(KERNEL_BIN) grub.cfg user-programs
-	@mkdir -p build/iso/boot/grub
+$(ISO): $(KERNEL_BIN) grub.cfg user-programs etc/fstab
+	@mkdir -p build/iso/boot/grub build/iso/boot/etc
 	cp $(KERNEL_BIN) build/iso/boot/vibeos.bin
 	cp grub.cfg build/iso/boot/grub/grub.cfg
-	-cp user/hello build/iso/boot/hello 2>/dev/null
-	-cp user/shell build/iso/boot/shell 2>/dev/null
-	-cp user/vi build/iso/boot/vi 2>/dev/null
-	-cp user/bomb build/iso/boot/bomb 2>/dev/null
-	-cp user/fork_test build/iso/boot/fork_test 2>/dev/null
-	-cp user/free build/iso/boot/free 2>/dev/null
-	-cp user/regions build/iso/boot/regions 2>/dev/null
-	-cp user/pagemap build/iso/boot/pagemap 2>/dev/null
-	-cp user/hexdump build/iso/boot/hexdump 2>/dev/null
-	-cp user/libc_test build/iso/boot/libc_test 2>/dev/null
-	-cp user/lua build/iso/boot/lua 2>/dev/null
-	-cp user/install build/iso/boot/install 2>/dev/null
-	-cp user/lsblk build/iso/boot/lsblk 2>/dev/null
-	-cp user/test_badptr build/iso/boot/test_badptr 2>/dev/null
+	cp etc/fstab build/iso/boot/etc/fstab
+	@# Copy every built user binary into the ISO under /boot. Missing
+	@# entries are skipped silently so a partial build still produces
+	@# a bootable image. libc_test, lua, and dynhello aren't in
+	@# SIMPLE_USER but are listed explicitly since they're built via
+	@# their own rules.
+	@for bin in $(SIMPLE_USER) libc_test lua dynhello dyn_echo; do \
+		if [ -x $(BUILD_USER)/$$bin ]; then \
+			cp $(BUILD_USER)/$$bin build/iso/boot/$$bin; \
+		fi; \
+	done
+	@# Dynamic-linking runtime for test-ISO boots. ld.so + shared libs
+	@# get staged as multiboot modules with /lib/ paths so the kernel
+	@# module loader drops them at /lib/<name>.
+	@mkdir -p build/iso/boot/lib
+	@for so in ld-vibeos.so.1 libulib.so.1 libvibc.so.1; do \
+		if [ -f $(SYSROOT_LIB)/$$so ]; then \
+			cp $(SYSROOT_LIB)/$$so build/iso/boot/lib/$$so; \
+		fi; \
+	done
 	grub-mkrescue -o $@ build/iso 2>/dev/null
 
-disk.img:
-	dd if=/dev/zero of=disk.img bs=1M count=16
-	@# Format the FAT partition (sectors 20480..32767 = 6 MB) with a
-	@# few sample files so the kernel's /fat mount has something to
-	@# show. `mkfs.fat` / `mcopy` come from dosfstools + mtools. If
-	@# they aren't installed this step silently skips — the FAT mount
-	@# will just be empty on boot.
-	-@which mkfs.fat >/dev/null 2>&1 && $(MAKE) --no-print-directory fat-prep || \
-		echo "(mkfs.fat not installed; /fat partition left blank)"
+# ---- Disk image with a single FAT32 partition at LBA 2048 ---------
+# Layout: LBA 0=MBR, 1..62=stage2, 63..2047=kernel ELF, 2048+=FAT32.
+# The partition is formatted + populated entirely from the host via
+# mkfs.fat + mcopy — no QEMU round-trip needed. `make disk.img` is
+# the one-stop entry point; `make patch-disk` is the legacy QEMU-based
+# flow (still works for debugging but not needed for normal use).
 
-.PHONY: fat-prep
-fat-prep: disk.img
-	@echo "Seeding /fat partition at LBA 20480"
-	@mkfs.fat -F 16 -n VIBEOS --offset=20480 disk.img 12288 >/dev/null 2>&1 || true
-	@printf 'Hello from the host!\nThis file was written via mtools before VibeOS booted.\n' > /tmp/vibeos-fat-hello.txt
-	@mcopy -i disk.img@@$$((20480*512)) /tmp/vibeos-fat-hello.txt ::HELLO.TXT 2>/dev/null || true
-	@rm -f /tmp/vibeos-fat-hello.txt
+DISK_SIZE_MB    = 64
+DISK_FAT_OFFSET = 2048
+
+$(DISK_IMG): user-programs
+	@mkdir -p $(dir $@)
+	@echo "Creating $(DISK_SIZE_MB) MB disk with FAT32 at LBA $(DISK_FAT_OFFSET)"
+	dd if=/dev/zero of=$@ bs=1M count=$(DISK_SIZE_MB) 2>/dev/null
+	mkfs.fat -F 32 -n VIBEOS --offset=$(DISK_FAT_OFFSET) $@ >/dev/null 2>&1
+	mmd -i $@@@$$(($(DISK_FAT_OFFSET)*512)) ::BIN ::LIB 2>/dev/null || true
+	@for f in $(SIMPLE_USER_TARGETS) $(BUILD_USER)/libc_test $(BUILD_USER)/lua \
+	          $(BUILD_USER)/dynhello $(BUILD_USER)/dyn_echo; do \
+		name=$$(basename $$f); \
+		mcopy -i $@@@$$(($(DISK_FAT_OFFSET)*512)) -D o $$f ::BIN/$$name; \
+	done
+	@# Dynamic-linking runtime: ld.so + shared libs.
+	mcopy -i $@@@$$(($(DISK_FAT_OFFSET)*512)) -D o \
+	      $(SYSROOT_LIB)/ld-vibeos.so.1 ::LIB/ld-vibeos.so.1
+	mcopy -i $@@@$$(($(DISK_FAT_OFFSET)*512)) -D o \
+	      $(SYSROOT_LIB)/libulib.so.1 ::LIB/libulib.so.1
+	mcopy -i $@@@$$(($(DISK_FAT_OFFSET)*512)) -D o \
+	      $(SYSROOT_LIB)/libvibc.so.1 ::LIB/libvibc.so.1
+	@echo "$@ ready ($(DISK_SIZE_MB) MB, FAT32)"
+	@# No /etc/fstab on the disk: the kernel's built-in defaults
+	@# mount this partition at '/' directly. A user-written /etc/fstab
+	@# would be consulted here if we grew post-boot fstab rereading,
+	@# but that's a future feature.
+
+# Back-compat alias so `make disk.img` and `make docker-disk` still work.
+disk.img: $(DISK_IMG)
+
+docker-disk:
+	$(DOCKER_RUN) make $(DISK_IMG)
 
 # run targets check that ISO exists; build it via Docker if missing.
 # -nographic routes all I/O (serial + monitor) to stdio. Ctrl-A X to quit.
 run: iso-ready
 	qemu-system-i386 -cdrom $(ISO) -nographic -m 128M
 
-run-disk: iso-ready disk.img
-	qemu-system-i386 -cdrom $(ISO) -drive file=disk.img,format=raw,if=ide \
+run-disk: iso-ready $(DISK_IMG)
+	qemu-system-i386 -cdrom $(ISO) -drive file=$(DISK_IMG),format=raw,if=ide \
 		-nographic -m 128M
 
 # run-vga opens a graphical window (or VNC) with VGA, serial on stdio
@@ -98,14 +136,51 @@ iso-ready:
 		$(MAKE) docker-build; \
 	fi
 
-USER_CFLAGS = -std=gnu99 -ffreestanding -O2 -Wall -Wextra -nostdlib -Iuser -Iuser/libc/include -mno-sse -mno-mmx -mno-sse2
+# Sysroot layout: user-space headers + archives live under
+# build/sysroot/usr so the build mimics a conventional Unix staging
+# tree. -I$(SYSROOT_INC) / -L$(SYSROOT_LIB) replace the old direct
+# paths under user/. Once .so support lands, the runtime ld.so will
+# also search $(SYSROOT_LIB).
+SYSROOT     = build/sysroot
+SYSROOT_INC = $(SYSROOT)/usr/include
+SYSROOT_LIB = $(SYSROOT)/usr/lib
+SYSROOT_BIN = $(SYSROOT)/usr/bin
+
+USER_CFLAGS = -std=gnu99 -ffreestanding -O2 -Wall -Wextra -nostdlib \
+              -I$(SYSROOT_INC) \
+              -mno-sse -mno-mmx -mno-sse2
 USER_LDFLAGS = -T user/user.ld -nostdlib -ffreestanding -lgcc
+
+# Stage headers into the sysroot. Copies are cheap and keep the
+# source-of-truth in user/ and user/libc/include/. -MD would let us
+# track transitive header deps but we're not there yet.
+SYSROOT_HDRS_TOP  = ulib.h syscall.h luaconf_vibeos.h
+SYSROOT_HDRS_LIBC = $(notdir $(wildcard user/libc/include/*.h))
+SYSROOT_HDRS = $(addprefix $(SYSROOT_INC)/, $(SYSROOT_HDRS_TOP) $(SYSROOT_HDRS_LIBC))
+
+$(SYSROOT_INC)/%.h: user/%.h
+	@mkdir -p $(dir $@)
+	@cp $< $@
+
+$(SYSROOT_INC)/%.h: user/libc/include/%.h
+	@mkdir -p $(dir $@)
+	@cp $< $@
+
+.PHONY: sysroot-headers
+sysroot-headers: $(SYSROOT_HDRS)
 
 USER_LIBC_SRC = user/libc/malloc.c user/libc/mem.c user/libc/string_extra.c \
                 user/libc/ctype.c user/libc/snprintf.c user/libc/strtod.c \
                 user/libc/stdio.c user/libc/errno.c user/libc/locale.c \
                 user/libc/misc.c
-USER_LIBC_OBJS = $(USER_LIBC_SRC:.c=.o) user/libc/setjmp.o
+USER_LIBC_OBJS = $(patsubst user/libc/%.c,$(BUILD_USER_LIBC)/%.o,$(USER_LIBC_SRC)) \
+                 $(BUILD_USER_LIBC)/setjmp.o
+
+# PIC variants for libvibc.so.1. setjmp.s is position-independent
+# already (no absolute-address text references), so we reuse its
+# object verbatim.
+USER_LIBC_PIC_OBJS = $(patsubst user/libc/%.c,$(BUILD_USER_LIBC)/%.pic.o,$(USER_LIBC_SRC)) \
+                     $(BUILD_USER_LIBC)/setjmp.o
 
 # Lua sources (Lua 5.4.7, vendored). lua.c/luac.c/linit.c are excluded —
 # we provide our own init and main.
@@ -115,25 +190,60 @@ LUA_CORE = lapi lcode lctype ldebug ldo ldump lfunc lgc llex lmem lobject \
 LUA_LIB  = lauxlib lbaselib lmathlib lstrlib ltablib liolib loslib lcorolib lutf8lib
 LUA_OBJS = $(addprefix build/lua/, $(addsuffix .o, $(LUA_CORE) $(LUA_LIB)))
 
-LUA_CFLAGS = $(USER_CFLAGS) -I$(LUA_SRC_DIR) -include user/luaconf_vibeos.h \
+LUA_CFLAGS = $(USER_CFLAGS) -I$(LUA_SRC_DIR) -include $(SYSROOT_INC)/luaconf_vibeos.h \
              -Wno-unused-parameter -Wno-unused-function -Wno-sign-compare \
              -Wno-implicit-fallthrough -Wno-parentheses -Wno-empty-body \
              -Wno-maybe-uninitialized -Wno-unused-but-set-variable
 
-user-programs: user/hello user/shell user/vi user/bomb user/fork_test \
-               user/free user/regions user/pagemap user/hexdump user/libc_test \
-               user/lua user/install user/lsblk user/test_badptr
+# Simple user binaries — crt0 + own .o + ulib.
+#
+# Split into two sets:
+#   STATIC_USER  — the rescue set that must boot even if /lib/*.so.1
+#                  is missing or the runtime linker is broken. Keep
+#                  small. `install` populates /lib and /bin on a
+#                  fresh disk; `runtests` drives the in-system test
+#                  harness before dynamic libs may be installed;
+#                  `hello` is the universal smoke test.
+#   DYNAMIC_USER — everything else. Linked with PT_INTERP=/lib/
+#                  ld-vibeos.so.1 and DT_NEEDED libulib.so.1 (and
+#                  libvibc.so.1 where applicable).
+#
+# The full list is declared here (before user-programs uses it)
+# because make expands variables in prereqs at parse time.
+STATIC_USER  = hello install runtests echo
+DYNAMIC_USER = shell vi bomb fork_test free regions pagemap hexdump \
+               lsblk test_badptr cat cp mv touch head tail wc \
+               grep find assert chroot ls sigtest sleep mount umount \
+               alarmtest strace mmaptest
+SIMPLE_USER  = $(STATIC_USER) $(DYNAMIC_USER)
+SIMPLE_USER_TARGETS  = $(addprefix $(BUILD_USER)/,$(SIMPLE_USER))
+STATIC_USER_TARGETS  = $(addprefix $(BUILD_USER)/,$(STATIC_USER))
+DYNAMIC_USER_TARGETS = $(addprefix $(BUILD_USER)/,$(DYNAMIC_USER))
 
-user/crt0.o: user/crt0.s
+user-programs: $(SIMPLE_USER_TARGETS) \
+               $(BUILD_USER)/libc_test $(BUILD_USER)/lua \
+               $(BUILD_USER)/dynhello $(BUILD_USER)/dyn_echo \
+               $(SYSROOT_LIB)/ld-vibeos.so.1 \
+               $(SYSROOT_LIB)/libulib.so.1 \
+               $(SYSROOT_LIB)/libvibc.so.1
+
+$(BUILD_USER)/crt0.o: user/crt0.s
+	@mkdir -p $(dir $@)
 	$(AS) $(ASFLAGS) $< -o $@
 
-user/libc/setjmp.o: user/libc/setjmp.s
+$(BUILD_USER_LIBC)/setjmp.o: user/libc/setjmp.s
+	@mkdir -p $(dir $@)
 	$(AS) $(ASFLAGS) $< -o $@
 
-user/libc/%.o: user/libc/%.c
+$(BUILD_USER_LIBC)/%.o: user/libc/%.c $(SYSROOT_HDRS)
+	@mkdir -p $(dir $@)
 	$(CC) $(USER_CFLAGS) -c $< -o $@
 
-build/lua/%.o: $(LUA_SRC_DIR)/%.c
+$(BUILD_USER_LIBC)/%.pic.o: user/libc/%.c $(SYSROOT_HDRS)
+	@mkdir -p $(dir $@)
+	$(CC) $(USER_CFLAGS_PIC) -c $< -o $@
+
+build/lua/%.o: $(LUA_SRC_DIR)/%.c $(SYSROOT_HDRS)
 	@mkdir -p $(dir $@)
 	$(CC) $(LUA_CFLAGS) -c $< -o $@
 
@@ -141,65 +251,168 @@ build/lua/%.o: $(LUA_SRC_DIR)/%.c
 lua-compile: $(LUA_OBJS)
 	@echo "Lua sources compiled: $(words $(LUA_OBJS)) objects"
 
-user/ulib.o: user/ulib.c
+$(BUILD_USER)/ulib.o: user/ulib.c $(SYSROOT_HDRS)
+	@mkdir -p $(dir $@)
 	$(CC) $(USER_CFLAGS) -c $< -o $@
 
-user/%.o: user/%.c
+# PIC variant of ulib for libulib.so.1 (shared object). Everything
+# else that's static keeps using the regular $(BUILD_USER)/ulib.o.
+USER_CFLAGS_PIC = $(USER_CFLAGS) -fPIC -fvisibility=default
+$(BUILD_USER)/ulib.pic.o: user/ulib.c $(SYSROOT_HDRS)
+	@mkdir -p $(dir $@)
+	$(CC) $(USER_CFLAGS_PIC) -c $< -o $@
+
+$(BUILD_USER)/%.o: user/%.c $(SYSROOT_HDRS)
+	@mkdir -p $(dir $@)
 	$(CC) $(USER_CFLAGS) -c $< -o $@
 
-user/hello: user/crt0.o user/hello.o
-	$(CC) $(USER_LDFLAGS) -o $@ $^
+# ---- Static library archives (sysroot-staged) ----------------------
+# libulib: minimal syscall wrappers, strings, printf. Every user
+# binary links it via `-lulib`.
+# libvibc: subset libc (malloc, stdio FILE*, strtod, snprintf, setjmp,
+# ctype). Binaries that need it link `-lvibc -lulib` — link order
+# matters because libvibc calls into ulib for strlen/memcpy.
+$(SYSROOT_LIB)/libulib.a: $(BUILD_USER)/ulib.o
+	@mkdir -p $(dir $@)
+	$(AR) rcs $@ $^
 
-user/shell: user/crt0.o user/ulib.o user/shell.o
-	$(CC) $(USER_LDFLAGS) -o $@ $^
+$(SYSROOT_LIB)/libvibc.a: $(USER_LIBC_OBJS)
+	@mkdir -p $(dir $@)
+	$(AR) rcs $@ $^
 
-user/vi: user/crt0.o user/ulib.o user/vi.o
-	$(CC) $(USER_LDFLAGS) -o $@ $^
+# libulib.so.1: shared-object version of ulib. Loaded at an
+# ld.so-chosen base (first-fit from 0x30000000). `-Wl,-shared` forces
+# the flag through to ld (gcc's i686-elf freestanding spec swallows a
+# bare `-shared`), producing ET_DYN. `-soname` records the run-time
+# name so main executables that list this lib in DT_NEEDED find it
+# by soname.
+$(SYSROOT_LIB)/libulib.so.1: $(BUILD_USER)/ulib.pic.o
+	@mkdir -p $(dir $@)
+	$(CC) -nostdlib -ffreestanding \
+	      -Wl,-shared -Wl,-soname,libulib.so.1 \
+	      -Wl,-z,max-page-size=0x1000 \
+	      -o $@ $(BUILD_USER)/ulib.pic.o -lgcc
+	@# Convenience symlink so `-lulib` picks up the shared form by
+	@# default. Removing this would force `-l:libulib.so.1` at link time.
+	@ln -sf libulib.so.1 $(SYSROOT_LIB)/libulib.so
 
-user/bomb: user/crt0.o user/ulib.o user/bomb.o
-	$(CC) $(USER_LDFLAGS) -o $@ $^
+# libvibc.so.1: shared-object form of the subset libc. Declares a
+# run-time dependency on libulib.so.1 (for strlen/memcpy/sys_*).
+# The -L / -lulib bits aren't consumed for symbol copy-in (it's a
+# shared library, not a final link), but they plant the DT_NEEDED
+# entry via ld's normal handling.
+$(SYSROOT_LIB)/libvibc.so.1: $(USER_LIBC_PIC_OBJS) $(SYSROOT_LIB)/libulib.so.1
+	@mkdir -p $(dir $@)
+	$(CC) -nostdlib -ffreestanding \
+	      -Wl,-shared -Wl,-soname,libvibc.so.1 \
+	      -Wl,-z,max-page-size=0x1000 \
+	      -o $@ $(USER_LIBC_PIC_OBJS) \
+	      -L$(SYSROOT_LIB) -lulib -lgcc
+	@ln -sf libvibc.so.1 $(SYSROOT_LIB)/libvibc.so
 
-user/fork_test: user/crt0.o user/ulib.o user/fork_test.o
-	$(CC) $(USER_LDFLAGS) -o $@ $^
+# ---- ld-vibeos.so.1: the user-space dynamic linker ---------------
+# Built as a plain ET_EXEC placed at 0x40000000 (see user/ldso/ldso.ld),
+# statically linked against libulib.a so the interpreter has its own
+# strcmp/puts/printf without any bootstrap problem. The kernel loads
+# this alongside any main exec that declares PT_INTERP=/lib/ld-vibeos.so.1.
+$(BUILD_USER_LDSO)/crt0_ldso.o: user/ldso/crt0_ldso.s
+	@mkdir -p $(dir $@)
+	$(AS) $(ASFLAGS) $< -o $@
 
-user/free: user/crt0.o user/ulib.o user/free.o
-	$(CC) $(USER_LDFLAGS) -o $@ $^
+$(BUILD_USER_LDSO)/ld_main.o: user/ldso/ld_main.c $(SYSROOT_HDRS)
+	@mkdir -p $(dir $@)
+	$(CC) $(USER_CFLAGS) -c $< -o $@
 
-user/regions: user/crt0.o user/ulib.o user/regions.o
-	$(CC) $(USER_LDFLAGS) -o $@ $^
+$(SYSROOT_LIB)/ld-vibeos.so.1: $(BUILD_USER_LDSO)/crt0_ldso.o \
+                               $(BUILD_USER_LDSO)/ld_main.o \
+                               user/ldso/ldso.ld $(SYSROOT_LIB)/libulib.a
+	@mkdir -p $(dir $@)
+	$(CC) -T user/ldso/ldso.ld -nostdlib -ffreestanding -static \
+	      -Wl,--no-dynamic-linker -Wl,--build-id=none \
+	      -o $@ $(BUILD_USER_LDSO)/crt0_ldso.o $(BUILD_USER_LDSO)/ld_main.o \
+	      -Wl,-Bstatic -L$(SYSROOT_LIB) -lulib -lgcc \
+	      -Wl,-Bdynamic
 
-user/pagemap: user/crt0.o user/ulib.o user/pagemap.o
-	$(CC) $(USER_LDFLAGS) -o $@ $^
+# Static rescue binaries: fully self-contained, no dynamic linker
+# needed. `-Wl,-Bstatic` forces archive lookup over the .so symlinks
+# we dropped next to them.
+$(STATIC_USER_TARGETS): $(BUILD_USER)/%: $(BUILD_USER)/crt0.o $(BUILD_USER)/%.o $(SYSROOT_LIB)/libulib.a
+	@mkdir -p $(dir $@)
+	$(CC) $(USER_LDFLAGS) -o $@ $(BUILD_USER)/crt0.o $(BUILD_USER)/$*.o \
+	      -Wl,-Bstatic -L$(SYSROOT_LIB) -lulib -Wl,-Bdynamic
 
-user/hexdump: user/crt0.o user/ulib.o user/hexdump.o
-	$(CC) $(USER_LDFLAGS) -o $@ $^
+# Dynamic binaries: main exec at 0x08048000, PT_INTERP=/lib/ld-vibeos.so.1,
+# DT_NEEDED libulib.so.1. Symbols resolved at load time by the
+# runtime linker.
+$(DYNAMIC_USER_TARGETS): $(BUILD_USER)/%: $(BUILD_USER)/crt0.o $(BUILD_USER)/%.o $(SYSROOT_LIB)/libulib.so.1
+	@mkdir -p $(dir $@)
+	$(CC) -T user/user.ld -nostdlib -ffreestanding \
+	      -Wl,--dynamic-linker=/lib/ld-vibeos.so.1 \
+	      -Wl,--no-as-needed \
+	      -Wl,-rpath-link,$(SYSROOT_LIB) \
+	      -o $@ $(BUILD_USER)/crt0.o $(BUILD_USER)/$*.o \
+	      -L$(SYSROOT_LIB) -lulib -lgcc
 
-user/libc_test: user/crt0.o user/ulib.o $(USER_LIBC_OBJS) user/libc_test.o
-	$(CC) $(USER_LDFLAGS) -o $@ $^
+# Binaries that need libvibc (libc_test + lua). Forced static so the
+# .so symlinks in $(SYSROOT_LIB) don't pull the dynamic forms in.
+$(BUILD_USER)/libc_test: $(BUILD_USER)/crt0.o $(BUILD_USER)/libc_test.o \
+                         $(SYSROOT_LIB)/libvibc.a $(SYSROOT_LIB)/libulib.a
+	@mkdir -p $(dir $@)
+	$(CC) $(USER_LDFLAGS) -o $@ $(BUILD_USER)/crt0.o $(BUILD_USER)/libc_test.o \
+	      -Wl,-Bstatic -L$(SYSROOT_LIB) -lvibc -lulib -Wl,-Bdynamic
 
-build/lua/linit_vibeos.o: user/linit_vibeos.c
+build/lua/linit_vibeos.o: user/linit_vibeos.c $(SYSROOT_HDRS)
 	@mkdir -p $(dir $@)
 	$(CC) $(LUA_CFLAGS) -c $< -o $@
 
-build/lua/lua_main.o: user/lua_main.c
+build/lua/lua_main.o: user/lua_main.c $(SYSROOT_HDRS)
 	@mkdir -p $(dir $@)
 	$(CC) $(LUA_CFLAGS) -c $< -o $@
 
-user/lua: user/crt0.o user/ulib.o $(USER_LIBC_OBJS) $(LUA_OBJS) build/lua/linit_vibeos.o build/lua/lua_main.o
-	$(CC) $(USER_LDFLAGS) -o $@ $^
+$(BUILD_USER)/lua: $(BUILD_USER)/crt0.o $(LUA_OBJS) \
+                   build/lua/linit_vibeos.o build/lua/lua_main.o \
+                   $(SYSROOT_LIB)/libvibc.a $(SYSROOT_LIB)/libulib.a
+	@mkdir -p $(dir $@)
+	$(CC) $(USER_LDFLAGS) -o $@ $(BUILD_USER)/crt0.o $(LUA_OBJS) \
+	      build/lua/linit_vibeos.o build/lua/lua_main.o \
+	      -Wl,-Bstatic -L$(SYSROOT_LIB) -lvibc -lulib -Wl,-Bdynamic
 
-user/install: user/crt0.o user/ulib.o user/install.o
-	$(CC) $(USER_LDFLAGS) -o $@ $^
+# Dynamic binaries: link against libulib.so.1, record PT_INTERP, and
+# let ld-vibeos.so.1 resolve symbols at load time. Keeps the same
+# 0x08048000 text base as static binaries (non-PIE main exec), so
+# user.ld still applies. `-Wl,--no-as-needed` forces libulib.so.1
+# to stay in DT_NEEDED even if no direct symbol reference is visible
+# at link time (important while we're piloting the flow).
+$(BUILD_USER)/dynhello: $(BUILD_USER)/crt0.o $(BUILD_USER)/dynhello.o \
+                        $(SYSROOT_LIB)/libulib.so.1
+	@mkdir -p $(dir $@)
+	$(CC) -T user/user.ld -nostdlib -ffreestanding \
+	      -Wl,--dynamic-linker=/lib/ld-vibeos.so.1 \
+	      -Wl,--no-as-needed \
+	      -Wl,-rpath-link,$(SYSROOT_LIB) \
+	      -o $@ $(BUILD_USER)/crt0.o $(BUILD_USER)/dynhello.o \
+	      -L$(SYSROOT_LIB) -lulib -lgcc
 
-user/lsblk: user/crt0.o user/ulib.o user/lsblk.o
-	$(CC) $(USER_LDFLAGS) -o $@ $^
-
-user/test_badptr: user/crt0.o user/ulib.o user/test_badptr.o
-	$(CC) $(USER_LDFLAGS) -o $@ $^
+$(BUILD_USER)/dyn_echo: $(BUILD_USER)/crt0.o $(BUILD_USER)/dyn_echo.o \
+                        $(SYSROOT_LIB)/libvibc.so.1 \
+                        $(SYSROOT_LIB)/libulib.so.1
+	@mkdir -p $(dir $@)
+	$(CC) -T user/user.ld -nostdlib -ffreestanding \
+	      -Wl,--dynamic-linker=/lib/ld-vibeos.so.1 \
+	      -Wl,--no-as-needed \
+	      -Wl,-rpath-link,$(SYSROOT_LIB) \
+	      -o $@ $(BUILD_USER)/crt0.o $(BUILD_USER)/dyn_echo.o \
+	      -L$(SYSROOT_LIB) -lvibc -lulib -lgcc
 
 clean:
-	rm -rf build user/*.o user/libc/*.o user/hello user/shell user/vi user/bomb user/fork_test \
-	       user/free user/regions user/pagemap user/hexdump user/libc_test user/lua user/install
+	rm -rf build
+	@# Legacy cleanup for repos mid-migration from the old
+	@# "build artifacts live next to sources" layout. Safe to remove
+	@# once every developer has switched.
+	@rm -f user/*.o user/libc/*.o user/ldso/*.o disk.img
+	@for b in $(SIMPLE_USER) libc_test lua dynhello dyn_echo; do \
+		rm -f user/$$b; \
+	done
 
 test: clean
 	$(MAKE) CFLAGS="$(CFLAGS) -DRUN_TESTS" $(ISO)
@@ -244,10 +457,10 @@ build/stage2.bin: src/boot/disk/stage2.s
 # Always rebuild on request: disk.img gets mutated in place by the ISO
 # install flow, so make's mtime comparisons can't reliably tell when
 # there's new content to restamp.
-bootdisk: build/mbr.bin build/stage2.bin $(KERNEL_BIN) disk.img
+bootdisk: build/mbr.bin build/stage2.bin $(KERNEL_BIN) $(DISK_IMG)
 	@mkdir -p build
-	@echo "Building bootdisk.img from disk.img + MBR + stage2 + kernel"
-	cp disk.img build/bootdisk.img
+	@echo "Building bootdisk.img from $(DISK_IMG) + MBR + stage2 + kernel"
+	cp $(DISK_IMG) build/bootdisk.img
 	dd if=build/mbr.bin of=build/bootdisk.img bs=512 count=1 conv=notrunc status=none
 	dd if=build/stage2.bin of=build/bootdisk.img bs=512 seek=1 conv=notrunc status=none
 	dd if=$(KERNEL_BIN) of=build/bootdisk.img bs=512 seek=63 conv=notrunc status=none
@@ -258,30 +471,73 @@ build/bootdisk.img: bootdisk
 docker-bootdisk:
 	$(DOCKER_RUN) make bootdisk
 
-# Rapid iteration: rebuild user binaries + kernel in docker, then boot
-# the ISO against the existing disk.img with an auto-run `install`.
-# Fast alternative to the manual run-disk -> install -> shutdown cycle
-# we'd otherwise do every time a binary changes.
-patch-disk: docker-build disk.img
-	@echo "Refreshing /disk/bin from latest build..."
-	@(sleep 2; printf '/bin/install\n'; sleep 10; printf 'shutdown\n'; sleep 2) \
-		| timeout 30 qemu-system-i386 -cdrom build/vibeos.iso \
-			-drive file=disk.img,format=raw,if=ide \
-			-nographic -m 128M > /dev/null 2>&1
-	@echo "patch-disk done — disk.img updated"
-
-# One-stop refresh: rebuild everything, reinstall user bins, rebuild
-# bootdisk. After this, `make run-bootdisk` picks up all source changes.
-refresh-bootdisk: patch-disk docker-bootdisk
-
 # Boot the disk image directly (no CDROM, no multiboot modules). If it
 # works, VibeOS is self-hosting for the install + boot flow.
-run-bootdisk: build/bootdisk.img
+run-bootdisk: docker-bootdisk
+	qemu-system-i386 -drive file=build/bootdisk.img,format=raw,if=ide \
+		-nographic -m 128M
+
+# Full "boot from installed drive" smoke test: build everything in
+# docker, create FAT32 disk via mcopy, stamp bootloader + kernel,
+# boot with disk as the ONLY media.
+run-installed: docker-build docker-disk docker-bootdisk
 	qemu-system-i386 -drive file=build/bootdisk.img,format=raw,if=ide \
 		-nographic -m 128M
 
 docker-test:
 	$(DOCKER_RUN) make test
+
+# ---- In-system test harness -----------------------------------------
+# test-iso builds build/vibeos-test.iso: production user binaries
+# PLUS each tests/*.vsh as a multiboot module whose cmdline contains
+# "tests/<name>.vsh". Kernel's module loader drops those into
+# /tests/<name>.vsh in ramfs (see src/kernel/main.c), so the
+# in-system `runtests /tests` walks them.
+
+TEST_VSH = $(wildcard tests/*.vsh)
+
+build/vibeos-test.iso: $(ISO) grub-test.cfg $(TEST_VSH)
+	@mkdir -p build/iso-test/boot/grub build/iso-test/boot/tests
+	@cp -r build/iso/boot/. build/iso-test/boot/
+	@cp grub-test.cfg build/iso-test/boot/grub/grub.cfg
+	@for f in $(TEST_VSH); do cp $$f build/iso-test/boot/tests/; done
+	grub-mkrescue -o $@ build/iso-test 2>/dev/null
+
+test-iso: build/vibeos-test.iso
+
+docker-test-iso:
+	$(DOCKER_RUN) make test-iso
+
+# test-disk boots the test ISO, sends a single "runtests /tests;
+# shutdown" line so there's no in-band stdin timing dependency, and
+# checks the captured serial log for FAIL markers. Run
+# `make docker-test-iso` first to build build/vibeos-test.iso in docker
+# (host typically doesn't have grub-mkrescue).
+test-disk:
+	@if [ ! -f build/vibeos-test.iso ]; then \
+	  echo "Missing build/vibeos-test.iso — run 'make docker-test-iso' first."; \
+	  exit 1; \
+	fi
+	@if [ ! -f $(DISK_IMG) ]; then \
+	  echo "Missing $(DISK_IMG) — run 'make docker-disk' first."; \
+	  exit 1; \
+	fi
+	@mkdir -p build
+	@(sleep 2; printf 'runtests /tests\n'; sleep 45; printf 'shutdown\n'; sleep 2) \
+	  | timeout 90 qemu-system-i386 -cdrom build/vibeos-test.iso \
+	      -drive file=$(DISK_IMG),format=raw,if=ide -nographic -m 128M \
+	  | tee build/test-output.log >/dev/null
+	@if grep -qE '^FAIL|, [1-9][0-9]* FAIL' build/test-output.log; then \
+	  grep -E '^(=== |PASS|FAIL)' build/test-output.log; \
+	  echo "TEST FAILURES"; exit 1; \
+	else \
+	  grep -E '^(=== |PASS|FAIL)' build/test-output.log; \
+	  echo "ALL TESTS PASSED"; \
+	fi
+
+# One-stop test run: rebuild everything in docker, then boot on host.
+docker-test-disk: docker-test-iso docker-disk
+	$(MAKE) test-disk
 
 docker-run: docker-build
 	make run

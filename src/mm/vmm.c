@@ -126,6 +126,25 @@ uint32_t vmm_get_physical_in(uint32_t *pd, uint32_t virt) {
     return (pt[pt_idx] & 0xFFFFF000) | (virt & 0xFFF);
 }
 
+int vmm_set_flags_in(uint32_t *pd, uint32_t virt, uint32_t flags) {
+    uint32_t pd_idx = virt >> 22;
+    uint32_t pt_idx = (virt >> 12) & 0x3FF;
+
+    if (!(pd[pd_idx] & VMM_FLAG_PRESENT)) return -1;
+    uint32_t *pt = (uint32_t *)(pd[pd_idx] & 0xFFFFF000);
+    if (!(pt[pt_idx] & VMM_FLAG_PRESENT)) return -1;
+
+    /* Preserve the physical frame (high 20 bits); rewrite the low 12
+       bits of the PTE with the requested flags. PRESENT is forced so
+       an mprotect(PROT_READ) doesn't accidentally clear the mapping. */
+    pt[pt_idx] = (pt[pt_idx] & 0xFFFFF000) | (flags & 0xFFF) | VMM_FLAG_PRESENT;
+
+    if (pd == current_cr3) {
+        __asm__ volatile ("invlpg (%0)" :: "r"(virt) : "memory");
+    }
+    return 0;
+}
+
 void vmm_map_page(uint32_t virt, uint32_t phys, uint32_t flags) {
     vmm_map_in(default_pd(), virt, phys, flags);
 }

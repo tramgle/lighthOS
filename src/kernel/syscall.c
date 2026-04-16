@@ -11,6 +11,7 @@
 #include "include/io.h"
 #include "kernel/timer.h"
 #include "fs/blkdev.h"
+#include "fs/fstab.h"
 
 /* --- Convenience wrappers for user-pointer validation ---
    USER_PATH copies a NUL-terminated path from user space into a
@@ -30,6 +31,36 @@
         }                                                                     \
     } while (0)
 #define USER_STRUCT_OK(ptr, type, write) USER_BUF_OK(ptr, sizeof(type), write)
+
+/* -- strace ring. Single-target: one pid at a time, global ring buffer.
+      trace_target_pid == 0 means tracing is off. Records are appended
+      at syscall return with the full arg set captured at entry. Since
+      the dispatcher may overwrite eax/ebx/etc. across the call, we
+      snapshot the entry registers before handing off. -- */
+#define STRACE_RING 1024
+struct strace_entry {
+    uint32_t seq;
+    uint32_t pid;
+    uint32_t num;
+    uint32_t a1, a2, a3, a4;
+    int32_t  ret;
+};
+static struct strace_entry trace_ring[STRACE_RING];
+static uint32_t trace_next_seq;
+static uint32_t trace_target_pid;
+
+static void trace_record(uint32_t pid, uint32_t num,
+                         uint32_t a1, uint32_t a2, uint32_t a3, uint32_t a4,
+                         int32_t ret) {
+    if (trace_target_pid == 0 || pid != trace_target_pid) return;
+    struct strace_entry *e = &trace_ring[trace_next_seq % STRACE_RING];
+    e->seq = trace_next_seq;
+    e->pid = pid;
+    e->num = num;
+    e->a1 = a1; e->a2 = a2; e->a3 = a3; e->a4 = a4;
+    e->ret = ret;
+    trace_next_seq++;
+}
 
 /* -- lsblk syscall payload. Mirrored in user/syscall.h. -- */
 struct blkdev_info_out {
@@ -82,7 +113,7 @@ static void regions_collect(uint32_t start_frame, uint32_t len, bool used) {
     regions_seen++;
 }
 
-static registers_t *syscall_handler(registers_t *regs) {
+static registers_t *syscall_dispatch(registers_t *regs) {
     uint32_t num = regs->eax;
 
     switch (num) {
@@ -243,7 +274,16 @@ static registers_t *syscall_handler(registers_t *regs) {
             regs->eax = (uint32_t)-1;
         } else {
             process_t *p = process_current();
-            if (p) strncpy(p->cwd, rp, VFS_MAX_PATH - 1);
+            if (p) {
+                /* Store cwd in chroot-local form so subsequent
+                   process_resolve_path calls don't prepend the root
+                   twice. Also: inside a chroot, `cd ..` from "/"
+                   canon_into already clamps at "/", so the user can't
+                   escape via cwd manipulation. */
+                process_strip_root_prefix(rp, p->root);
+                strncpy(p->cwd, rp, VFS_MAX_PATH - 1);
+                p->cwd[VFS_MAX_PATH - 1] = '\0';
+            }
             regs->eax = 0;
         }
         return regs;
@@ -408,6 +448,256 @@ static registers_t *syscall_handler(registers_t *regs) {
         return regs;
     }
 
+    case SYS_KILL: {
+        int target = (int)regs->ebx;
+        int signo = (int)regs->ecx;
+        regs->eax = (uint32_t)process_signal(target, signo);
+        return regs;
+    }
+
+    case SYS_SETPGID: {
+        uint32_t pid = regs->ebx;
+        uint32_t pgid = regs->ecx;
+        process_t *p = process_current();
+        process_t *target = (pid == 0) ? p : process_get(pid);
+        if (!target) { regs->eax = (uint32_t)-1; return regs; }
+        target->pgid = (pgid == 0) ? target->pid : pgid;
+        regs->eax = 0;
+        return regs;
+    }
+
+    case SYS_GETPGID: {
+        uint32_t pid = regs->ebx;
+        process_t *target = (pid == 0) ? process_current() : process_get(pid);
+        regs->eax = target ? target->pgid : (uint32_t)-1;
+        return regs;
+    }
+
+    case SYS_CHROOT: {
+        USER_PATH(regs->ebx, upath);
+        char target[VFS_MAX_PATH];
+        if (process_resolve_path(upath, target, sizeof target) != 0) {
+            regs->eax = (uint32_t)-1; return regs;
+        }
+        struct vfs_stat st;
+        if (vfs_stat(target, &st) != 0 || st.type != VFS_DIR) {
+            regs->eax = (uint32_t)-1; return regs;
+        }
+        process_t *p = process_current();
+        if (!p) { regs->eax = (uint32_t)-1; return regs; }
+        /* Strip trailing slash from root so later prepend produces a
+           canonical "/root/subpath" not "/root//subpath". Keep a lone
+           "/" as-is (empty chroot). */
+        int tlen = 0;
+        while (target[tlen]) tlen++;
+        if (tlen > 1 && target[tlen - 1] == '/') tlen--;
+        int copy = tlen < (int)sizeof p->root - 1 ? tlen : (int)sizeof p->root - 1;
+        for (int i = 0; i < copy; i++) p->root[i] = target[i];
+        p->root[copy] = '\0';
+        /* Per chroot(2) semantics, cwd becomes '/' in the new root. */
+        strcpy(p->cwd, "/");
+        regs->eax = 0;
+        return regs;
+    }
+
+    case SYS_PIPE: {
+        /* User hands in an int[2] buffer. Validate, create the pipe
+           into a local pair, then copy back. */
+        USER_BUF_OK(regs->ebx, sizeof(int) * 2, 1);
+        int kfds[2];
+        int rc = fd_pipe(kfds);
+        if (rc == 0) copy_to_user((void *)regs->ebx, kfds, sizeof kfds);
+        regs->eax = (uint32_t)rc;
+        return regs;
+    }
+
+    case SYS_SIGNAL: {
+        int signo = (int)regs->ebx;
+        uint32_t handler = regs->ecx;
+        regs->eax = (uint32_t)process_sig_install(signo, handler);
+        return regs;
+    }
+
+    case SYS_MOUNT: {
+        /* ebx=source (blkdev name), ecx=target (path), edx=type,
+           esi=flags. All NUL-terminated user strings; we bounce each
+           through a kernel scratch via strncpy_from_user so the fs
+           code never sees user pointers. No permission model yet —
+           any process can mount. */
+        char ksource[32], ktype[16], kflags[8];
+        USER_PATH(regs->ecx, ktarget);
+        if (strncpy_from_user(ksource, (const char *)regs->ebx,
+                              sizeof ksource) < 0) {
+            regs->eax = (uint32_t)-1; return regs;
+        }
+        if (strncpy_from_user(ktype, (const char *)regs->edx,
+                              sizeof ktype) < 0) {
+            regs->eax = (uint32_t)-1; return regs;
+        }
+        if (regs->esi) {
+            if (strncpy_from_user(kflags, (const char *)regs->esi,
+                                  sizeof kflags) < 0) {
+                regs->eax = (uint32_t)-1; return regs;
+            }
+        } else {
+            kflags[0] = 'r'; kflags[1] = 'w'; kflags[2] = '\0';
+        }
+        char rp[VFS_MAX_PATH];
+        if (process_resolve_path(ktarget, rp, sizeof rp) != 0) {
+            regs->eax = (uint32_t)-1; return regs;
+        }
+        regs->eax = (uint32_t)fstab_do_mount(ksource, rp, ktype, kflags);
+        return regs;
+    }
+
+    case SYS_ALARM: {
+        regs->eax = process_set_alarm(regs->ebx);
+        return regs;
+    }
+
+    case SYS_MMAP_ANON: {
+        /* ebx=addr, ecx=length, edx=prot.
+           Anonymous fixed-address mapping: allocates fresh zeroed
+           frames and installs them at exactly `addr` in the caller's
+           PD. Fails if the range collides with any existing mapping.
+           PROT_EXEC is accepted but unenforced (no NX on i386 without
+           PAE). No MAP_ANYWHERE yet — callers must know where they
+           want things. */
+        uint32_t addr   = regs->ebx;
+        uint32_t length = regs->ecx;
+        uint32_t prot   = regs->edx;
+
+        if (length == 0)                              { regs->eax = (uint32_t)-1; return regs; }
+        if (addr & (PAGE_SIZE - 1))                   { regs->eax = (uint32_t)-1; return regs; }
+        if (length & (PAGE_SIZE - 1))                 { regs->eax = (uint32_t)-1; return regs; }
+        if (addr < 0x08000000u)                       { regs->eax = (uint32_t)-1; return regs; }
+        if (addr + length < addr)                     { regs->eax = (uint32_t)-1; return regs; }
+        if (addr + length > 0xC0000000u)              { regs->eax = (uint32_t)-1; return regs; }
+
+        uint32_t *pd = task_current_pd();
+        if (!pd) { regs->eax = (uint32_t)-1; return regs; }
+
+        /* Overlap check: refuse if any page in the range is already
+           mapped. Caller's problem to avoid collisions. */
+        for (uint32_t off = 0; off < length; off += PAGE_SIZE) {
+            if (vmm_get_physical_in(pd, addr + off)) {
+                regs->eax = (uint32_t)-1; return regs;
+            }
+        }
+
+        /* PROT → VMM flags. Always USER + PRESENT; WRITE bit optional. */
+        uint32_t vmm_flags = VMM_FLAG_PRESENT | VMM_FLAG_USER;
+        if (prot & PROT_WRITE) vmm_flags |= VMM_FLAG_WRITE;
+
+        /* Allocate + map. On mid-way OOM, unwind what we mapped so
+           far. Each freshly allocated frame is zeroed via its
+           identity mapping first — user code mmaps to a known-clean
+           page. */
+        for (uint32_t off = 0; off < length; off += PAGE_SIZE) {
+            uint32_t frame = pmm_alloc_frame();
+            if (!frame) {
+                for (uint32_t u = 0; u < off; u += PAGE_SIZE) {
+                    uint32_t f = vmm_get_physical_in(pd, addr + u) & 0xFFFFF000;
+                    vmm_unmap_in(pd, addr + u);
+                    if (f) pmm_free_frame(f);
+                }
+                regs->eax = (uint32_t)-1; return regs;
+            }
+            memset((void *)frame, 0, PAGE_SIZE);
+            vmm_map_in(pd, addr + off, frame, vmm_flags);
+        }
+
+        regs->eax = addr;
+        return regs;
+    }
+
+    case SYS_MPROTECT: {
+        /* ebx=addr, ecx=length, edx=prot. Changes page permissions on
+           an already-mapped range. No-op on unmapped pages would leave
+           an inconsistent range, so we bail on the first gap. */
+        uint32_t addr   = regs->ebx;
+        uint32_t length = regs->ecx;
+        uint32_t prot   = regs->edx;
+
+        if (length == 0)                              { regs->eax = 0; return regs; }
+        if (addr & (PAGE_SIZE - 1))                   { regs->eax = (uint32_t)-1; return regs; }
+        if (length & (PAGE_SIZE - 1))                 { regs->eax = (uint32_t)-1; return regs; }
+        if (addr < 0x08000000u)                       { regs->eax = (uint32_t)-1; return regs; }
+        if (addr + length < addr)                     { regs->eax = (uint32_t)-1; return regs; }
+        if (addr + length > 0xC0000000u)              { regs->eax = (uint32_t)-1; return regs; }
+
+        uint32_t *pd = task_current_pd();
+        if (!pd) { regs->eax = (uint32_t)-1; return regs; }
+
+        uint32_t vmm_flags = VMM_FLAG_PRESENT | VMM_FLAG_USER;
+        if (prot & PROT_WRITE) vmm_flags |= VMM_FLAG_WRITE;
+
+        for (uint32_t off = 0; off < length; off += PAGE_SIZE) {
+            if (vmm_set_flags_in(pd, addr + off, vmm_flags) != 0) {
+                regs->eax = (uint32_t)-1; return regs;
+            }
+        }
+        regs->eax = 0;
+        return regs;
+    }
+
+    case SYS_UMOUNT: {
+        USER_PATH(regs->ebx, upath);
+        char rp[VFS_MAX_PATH];
+        if (process_resolve_path(upath, rp, sizeof rp) != 0) {
+            regs->eax = (uint32_t)-1; return regs;
+        }
+        int rc = vfs_umount(rp);
+        if (rc == 0) {
+            /* Keep lsblk honest: clear mount_path on any blkdev whose
+               mount_path matches this path. vfs_umount itself doesn't
+               know about blkdev bookkeeping. */
+            for (int i = 0; ; i++) {
+                blkdev_t *d = blkdev_nth(i);
+                if (!d) break;
+                if (strcmp(d->mount_path, rp) == 0) d->mount_path[0] = '\0';
+            }
+        }
+        regs->eax = (uint32_t)rc;
+        return regs;
+    }
+
+    case SYS_SIGRETURN: {
+        /* Restores regs in place from the per-process snapshot and
+           drops the delivering flag. eax is part of the restored frame
+           so the original syscall's return value is preserved. */
+        process_sigreturn(regs);
+        return regs;
+    }
+
+    case SYS_TRACEME: {
+        /* Set/clear the single strace target. ebx = pid (0 to disable).
+           No permission check — any process can drive this. Reset
+           the ring pointer when enabling so the tracer sees its
+           capture start at seq=0. Disable (pid=0) leaves the ring
+           intact so the tracer can drain post-exit. */
+        if (regs->ebx != 0) trace_next_seq = 0;
+        trace_target_pid = regs->ebx;
+        regs->eax = 0;
+        return regs;
+    }
+
+    case SYS_TRACE_READ: {
+        /* ebx = seq. If seq < trace_next_seq and still in the ring
+           window, copy into *ecx and return 0. Otherwise return -1
+           (caller retries or gives up). */
+        uint32_t seq = regs->ebx;
+        USER_STRUCT_OK(regs->ecx, struct strace_entry, 1);
+        if (seq >= trace_next_seq) { regs->eax = (uint32_t)-1; return regs; }
+        uint32_t oldest = trace_next_seq > STRACE_RING ?
+                          trace_next_seq - STRACE_RING : 0;
+        if (seq < oldest) { regs->eax = (uint32_t)-1; return regs; }
+        copy_to_user((void *)regs->ecx, &trace_ring[seq % STRACE_RING],
+                     sizeof(struct strace_entry));
+        regs->eax = 0;
+        return regs;
+    }
+
     case SYS_SHUTDOWN: {
         __asm__ volatile ("cli");
         /* QEMU ACPI shutdown (i440fx/PIIX4, and older Bochs fallback) */
@@ -421,6 +711,34 @@ static registers_t *syscall_handler(registers_t *regs) {
         regs->eax = (uint32_t)-1;
         return regs;
     }
+}
+
+/* Entry point for int 0x80. Every exit path runs through the pending-
+   signal hook so a queued SIGINT (or anything else with a user handler)
+   is delivered on the iret back to ring 3. SYS_SIGRETURN already
+   rewrote regs to the pre-handler snapshot — the hook's sig_delivering
+   guard was cleared there, so follow-up pending signals can be
+   delivered on the next syscall without stacking. */
+static registers_t *syscall_handler(registers_t *regs) {
+    /* Snapshot entry registers so the strace recorder can see the
+       original syscall number + args even after the dispatcher has
+       clobbered eax with a return value. */
+    uint32_t num = regs->eax;
+    uint32_t a1  = regs->ebx, a2 = regs->ecx, a3 = regs->edx, a4 = regs->esi;
+    process_t *caller = process_current();
+    uint32_t pid = caller ? caller->pid : 0;
+
+    registers_t *out = syscall_dispatch(regs);
+
+    /* Record AFTER dispatch so we get the return value. SYS_TRACEME/
+       SYS_TRACE_READ themselves are recorded too — harmless and lets
+       the tracer see its own enable call. */
+    if (trace_target_pid && pid == trace_target_pid) {
+        trace_record(pid, num, a1, a2, a3, a4, (int32_t)out->eax);
+    }
+
+    process_deliver_pending_signals(out);
+    return out;
 }
 
 void syscall_init(void) {

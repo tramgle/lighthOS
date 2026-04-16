@@ -24,6 +24,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     grub-pc-bin \
     grub-common \
     mtools \
+    dosfstools \
     qemu-system-x86 \
     && rm -rf /var/lib/apt/lists/*
 

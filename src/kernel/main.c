@@ -24,6 +24,7 @@
 #include "fs/ramfs.h"
 #include "fs/simplefs.h"
 #include "fs/fat.h"
+#include "fs/fstab.h"
 #include "kernel/task.h"
 #include "shell/shell.h"
 
@@ -34,6 +35,11 @@ extern uint32_t _kernel_end;
 void kernel_main(uint32_t magic, multiboot_info_t *mbi) {
     vga_init();
     serial_init();
+    /* Capture everything from here forward into an in-memory log.
+       Once the root fs is mounted we'll flush to /boot.log; until
+       then the buffer lives in BSS so it's safe to use before
+       heap_init. */
+    boot_log_enable();
 
     kprintf("VibeOS booting...\n\n");
 
@@ -107,9 +113,13 @@ void kernel_main(uint32_t magic, multiboot_info_t *mbi) {
     vfs_mount("/", ramfs_get_ops(), ramfs_root, NULL);
     serial_printf("[boot] Root filesystem mounted (ramfs)\n");
 
-    /* Load GRUB modules into /bin/.
-       grub.cfg should pass names explicitly:  module /boot/hello hello
-       Then cmdline is "/boot/hello hello" — we take the last space-separated token. */
+    /* Load GRUB modules.
+       grub.cfg passes names explicitly:   module /boot/hello hello
+       cmdline becomes "/boot/hello hello". We use the LAST
+       space-separated token as the install path. If that token
+       contains a '/' it's used as-is (e.g. "tests/pipes.vsh" →
+       /tests/pipes.vsh, with /tests auto-created). Otherwise the
+       module is dropped into /bin/<name>. */
     vfs_mkdir("/bin");
     if (mbi->flags & MULTIBOOT_FLAG_MODS && mbi->mods_count > 0) {
         multiboot_mod_t *mods = (multiboot_mod_t *)mbi->mods_addr;
@@ -117,87 +127,96 @@ void kernel_main(uint32_t magic, multiboot_info_t *mbi) {
             uint32_t size = mods[i].mod_end - mods[i].mod_start;
             const char *cmdline = (const char *)mods[i].cmdline;
 
-            char namebuf[32];
-            namebuf[0] = '\0';
-
+            /* Copy the last token of cmdline into `token`. */
+            char token[VFS_MAX_PATH];
+            token[0] = '\0';
             if (cmdline && *cmdline) {
-                /* Find the last space-separated token, and within that,
-                   the portion after the last '/' */
                 const char *last_token = cmdline;
                 for (const char *p = cmdline; *p; p++) {
                     if (*p == ' ') last_token = p + 1;
                 }
-                const char *base = last_token;
-                for (const char *p = last_token; *p; p++) {
-                    if (*p == '/') base = p + 1;
-                }
                 int j = 0;
-                while (base[j] && base[j] != ' ' && j < 31) {
-                    namebuf[j] = base[j];
+                while (last_token[j] && last_token[j] != ' ' &&
+                       j < (int)sizeof token - 1) {
+                    token[j] = last_token[j];
                     j++;
                 }
-                namebuf[j] = '\0';
+                token[j] = '\0';
+            }
+            if (token[0] == '\0') {
+                token[0] = 'm'; token[1] = 'o'; token[2] = 'd';
+                token[3] = '0' + (char)i; token[4] = '\0';
             }
 
-            /* Fallback if empty */
-            if (namebuf[0] == '\0') {
-                namebuf[0] = 'm'; namebuf[1] = 'o'; namebuf[2] = 'd';
-                namebuf[3] = '0' + (char)i; namebuf[4] = '\0';
-            }
+            /* Does the token carry its own directory? */
+            int has_slash = 0;
+            for (int k = 0; token[k]; k++) if (token[k] == '/') { has_slash = 1; break; }
 
             char path[VFS_MAX_PATH];
-            strcpy(path, "/bin/");
-            strcat(path, namebuf);
+            if (has_slash) {
+                /* Use token verbatim as the path, prefixing '/' if it
+                   doesn't start with one. Auto-create the parent
+                   directory so grub-test.cfg can use nested paths like
+                   "tests/pipes.vsh" without hand-rolling mkdirs. */
+                int pi = 0;
+                if (token[0] != '/') path[pi++] = '/';
+                int k = 0;
+                while (token[k] && pi < (int)sizeof path - 1) path[pi++] = token[k++];
+                path[pi] = '\0';
+                /* Auto-mkdir the parent. Only handles one level, which
+                   is enough for /tests/. */
+                int last_slash = -1;
+                for (int s = 0; path[s]; s++) if (path[s] == '/') last_slash = s;
+                if (last_slash > 0) {
+                    char parent[VFS_MAX_PATH];
+                    for (int s = 0; s < last_slash; s++) parent[s] = path[s];
+                    parent[last_slash] = '\0';
+                    vfs_mkdir(parent);  /* idempotent */
+                }
+            } else {
+                strcpy(path, "/bin/");
+                strcat(path, token);
+            }
 
             vfs_create(path, VFS_FILE);
             vfs_write(path, (void *)mods[i].mod_start, size, 0);
-            serial_printf("[boot] Loaded module '%s' (%u bytes, cmdline='%s', phys=0x%x) -> %s\n",
-                          namebuf, size, cmdline ? cmdline : "(null)", mods[i].mod_start, path);
+            serial_printf("[boot] Loaded module (%u bytes, cmdline='%s', phys=0x%x) -> %s\n",
+                          size, cmdline ? cmdline : "(null)", mods[i].mod_start, path);
         }
     }
 
-    /* Probe ATA and mount disk if present. The first 2048 sectors (1 MB)
-       are reserved for MBR + second-stage loader + kernel image, so the
-       simplefs partition starts at sector 2048 — we present it to
-       simplefs via a partition wrapper so the fs sees sector 0 as its
-       own superblock. */
+    /* Probe ATA and carve out the FAT32 partition starting at LBA 2048
+       (sectors 0..2047 are MBR + stage2 + kernel for the bootdisk
+       flow). Partition size = total disk minus the reserved region.
+       fstab then mounts this as the root filesystem. */
     ata_init();
     if (ata_get_device()) {
         blkdev_t *root_dev = ata_get_device();
-
-        /* Partition 1: simplefs at LBA 2048 (matches MBR partition table). */
-        blkdev_t *sfs_part = blkdev_partition(root_dev, 2048, 18432, "part0");
-        if (sfs_part) {
-            vfs_node_t *sfs_root = simplefs_mount(sfs_part);
-            if (sfs_root) {
-                vfs_mkdir("/disk");
-                vfs_mount("/disk", simplefs_get_ops(), sfs_root, sfs_root->private_data);
-                strncpy(sfs_part->mount_path, "/disk", sizeof sfs_part->mount_path - 1);
-                strncpy(sfs_part->fs_type, "simplefs", sizeof sfs_part->fs_type - 1);
-                sfs_part->read_only = 0;
-                serial_printf("[boot] Disk mounted at /disk (simplefs, start=2048)\n");
-            }
-        }
-
-        /* Partition 2: FAT16 at LBA 20480. Mount at /fat so host tools
-           can seed it with `mkfs.fat` + `mcopy` and VibeOS can read
-           those files back. Fails silently if the region isn't
-           FAT-formatted yet. */
-        if (root_dev->total_sectors > 20480) {
-            blkdev_t *fat_part = blkdev_partition(root_dev, 20480, 12288, "part1");
-            if (fat_part) {
-                vfs_node_t *fat_root = fat_mount(fat_part);
-                if (fat_root) {
-                    vfs_mkdir("/fat");
-                    vfs_mount("/fat", fat_get_ops(), fat_root, fat_root->private_data);
-                    strncpy(fat_part->mount_path, "/fat", sizeof fat_part->mount_path - 1);
-                    strncpy(fat_part->fs_type, "fat16", sizeof fat_part->fs_type - 1);
-                    fat_part->read_only = 1;   /* driver is read-only in v1 */
-                    serial_printf("[boot] FAT partition mounted at /fat (start=20480)\n");
-                }
-            }
+        uint32_t part_start = 2048;
+        uint32_t part_size  = root_dev->total_sectors > part_start
+                              ? root_dev->total_sectors - part_start : 0;
+        if (part_size > 0) {
+            blkdev_partition(root_dev, part_start, part_size, "ata0p0");
         }
     }
+
+    /* Primary fstab: try ramfs /etc/fstab first (shipped as a
+       multiboot module in the ISO), fall back to a built-in default
+       when it's missing. ISO boots keep ramfs at '/' and mount the
+       disk (if attached) at /disk for dev work. Self-contained
+       bootdisk boots replace '/' with the install FAT. */
+    struct vfs_stat fstab_st;
+    int mounted = (vfs_stat("/etc/fstab", &fstab_st) == 0)
+                      ? fstab_mount_file("/etc/fstab")
+                      : fstab_mount_defaults();
+    serial_printf("[boot] primary fstab mounted %d entry(ies)\n", mounted);
+
+    /* Flush early boot log to /boot.log on a writable fs. For the
+       bootdisk case the install FAT is now mounted at '/' directly,
+       so this lands at /boot.log on the install partition; ISO boots
+       write to ramfs (ephemeral) which is fine. */
+    boot_log_flush("/boot.log");
+    serial_printf("[boot] boot log flushed to /boot.log\n");
 
     /* Initialize tasking and process management */
     task_init();
@@ -213,16 +232,19 @@ void kernel_main(uint32_t magic, multiboot_info_t *mbi) {
 
     task_enable_scheduling();
 
-    /* Prefer a shell installed on the disk; fall back to the ramfs
-       shell; fall back to the built-in kernel shell. */
-    struct vfs_stat shell_st;
+    /* Shell selection: always /bin/shell. Installed-system boots have
+       the FAT mounted at '/' so /bin/shell is the installed binary;
+       ISO boots have ramfs at '/' with /bin/shell loaded from
+       multiboot modules. No chroot layer in either case — the
+       "install = /disk + chroot" model was an accidental detour. */
+    struct vfs_stat shell_st, tests_st;
     const char *shell_path = NULL;
-    if (vfs_stat("/disk/bin/shell", &shell_st) == 0) {
-        shell_path = "/disk/bin/shell";
-        kprintf("Starting disk-installed shell...\n\n");
-    } else if (vfs_stat("/bin/shell", &shell_st) == 0) {
+    int in_test_mode = (vfs_stat("/tests", &tests_st) == 0);
+
+    if (vfs_stat("/bin/shell", &shell_st) == 0) {
         shell_path = "/bin/shell";
-        kprintf("Starting user shell...\n\n");
+        kprintf(in_test_mode ? "Starting test-mode shell...\n\n"
+                             : "Starting user shell...\n\n");
     }
 
     if (shell_path) {

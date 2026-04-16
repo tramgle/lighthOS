@@ -2,6 +2,7 @@
 #include "kernel/tss.h"
 #include "kernel/panic.h"
 #include "kernel/debug.h"
+#include "kernel/process.h"
 #include "mm/heap.h"
 #include "mm/vmm.h"
 #include "lib/string.h"
@@ -25,7 +26,7 @@ uint32_t task_count(void) {
     uint32_t count = 0;
     for (int i = 0; i < TASK_MAX; i++) {
         if (tasks[i].state == TASK_READY || tasks[i].state == TASK_RUNNING ||
-            tasks[i].state == TASK_BLOCKED)
+            tasks[i].state == TASK_BLOCKED || tasks[i].state == TASK_STOPPED)
             count++;
     }
     return count;
@@ -172,7 +173,7 @@ task_t *task_create(const char *name, void (*entry)(void)) {
     return t;
 }
 
-static const char *state_names[] = {"READY", "RUNNING", "BLOCKED", "DEAD"};
+static const char *state_names[] = {"READY", "RUNNING", "BLOCKED", "STOPPED", "DEAD"};
 
 void task_list_all(void) {
     kprintf("PID  STATE    NAME\n");
@@ -246,5 +247,14 @@ registers_t *schedule(registers_t *regs) {
         }
     }
 
-    return (registers_t *)current->esp;
+    /* Hook pending-signal delivery into every scheduler return. The
+       target regs live on the about-to-resume task's kernel stack and
+       will iret into ring 3 if that task was running user code; the
+       helper inspects regs->cs and no-ops for kernel-mode frames
+       (e.g. the idle task's initial frame). CR3 is already pointed at
+       the resumed task above, so writes into useresp land in its
+       user pages. */
+    registers_t *ret = (registers_t *)current->esp;
+    process_deliver_pending_signals(ret);
+    return ret;
 }

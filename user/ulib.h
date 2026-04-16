@@ -18,4 +18,19 @@ void   puts(const char *s);
 void   putchar(char c);
 int    printf(const char *fmt, ...);
 
+/* Signal dispositions. Match POSIX. */
+#define SIG_DFL ((void (*)(int)) 0)
+#define SIG_IGN ((void (*)(int)) 1)
+#define SIG_ERR ((void (*)(int)) -1)
+#define NSIG_USER 32
+typedef void (*sighandler_t)(int);
+
+/* Install a user-level signal handler. Stores `handler` in a per-
+   process table and installs a shared trampoline with the kernel; when
+   the kernel delivers `signo`, the trampoline looks up and invokes
+   `handler`, then unconditionally calls sys_sigreturn. Returns the
+   previous handler (SIG_DFL/SIG_IGN/fn); SIG_ERR on invalid signo or
+   uncatchable signal (SIG_KILL, SIG_STOP). */
+sighandler_t signal(int signo, sighandler_t handler);
+
 #endif

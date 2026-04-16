@@ -1,25 +1,18 @@
 #ifndef _SIGNAL_H
 #define _SIGNAL_H
 
-/* Signals aren't supported; provide constants and stub signal() so that
-   Lua's `lua.c` (which installs SIGINT handlers) can compile. */
+/* Thin shim over the real ulib signal() so Lua (which installs a SIGINT
+   handler) can compile with the vendored libc headers. sighandler_t,
+   SIG_DFL/IGN/ERR, and signal() itself live in ulib.h; we only add the
+   POSIX-style SIGINT/SIGTERM/SIGABRT names Lua expects. */
+
+#include "ulib.h"
 
 typedef int sig_atomic_t;
-
-#define SIG_ERR  ((void (*)(int)) -1)
-#define SIG_DFL  ((void (*)(int))  0)
-#define SIG_IGN  ((void (*)(int))  1)
 
 #define SIGINT   2
 #define SIGTERM 15
 #define SIGABRT  6
-
-typedef void (*sighandler_t)(int);
-
-static inline sighandler_t signal(int sig, sighandler_t h) {
-    (void)sig; (void)h;
-    return SIG_DFL;
-}
 
 static inline int raise(int sig) { (void)sig; return 0; }
 

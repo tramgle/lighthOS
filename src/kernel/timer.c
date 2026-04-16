@@ -1,6 +1,7 @@
 #include "kernel/timer.h"
 #include "kernel/isr.h"
 #include "kernel/task.h"
+#include "kernel/process.h"
 #include "kernel/pic.h"
 #include "include/io.h"
 #include "lib/kprintf.h"
@@ -13,6 +14,12 @@ static volatile uint32_t tick_count = 0;
 
 static registers_t *timer_callback(registers_t *regs) {
     tick_count++;
+    /* Drive SYS_ALARM timeouts. IRQ context: interrupts are masked,
+       and the walk is bounded (PROCESS_MAX=16) so it's cheap to do
+       unconditionally. schedule() runs after so a newly queued
+       SIG_ALRM can be delivered on return if we end up re-entering
+       the target task. */
+    process_tick_alarms();
     return schedule(regs);
 }
 

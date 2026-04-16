@@ -1,0 +1,3 @@
+# VibeOS /etc/fstab — mounted at boot by src/fs/fstab.c
+# source   mountpoint   type    flags
+ata0p0     /disk        fat     rw

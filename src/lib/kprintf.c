@@ -2,12 +2,39 @@
 #include "drivers/vga.h"
 #include "drivers/serial.h"
 #include "lib/string.h"
+#include "fs/vfs.h"
+
+/* Early-boot log capture. Sized to comfortably hold the boot-phase
+   chatter (a few KB in practice). Overflow silently truncates. */
+#define BOOT_LOG_MAX 16384
+static char     boot_log_buf[BOOT_LOG_MAX];
+static uint32_t boot_log_len;
+static bool     boot_log_on;
+
+void boot_log_enable(void) { boot_log_on = true; }
+
+void boot_log_flush(const char *path) {
+    if (!path || boot_log_len == 0) return;
+    /* Create-or-truncate, then write the whole captured buffer. vfs_write
+       doesn't have an "append the diff since last flush" primitive so
+       each flush is a full rewrite — cheap for < 16 KB. */
+    if (vfs_create(path, VFS_FILE) != 0) {
+        /* File already exists; that's fine — vfs_write will overwrite
+           starting at offset 0. */
+    }
+    vfs_write(path, boot_log_buf, boot_log_len, 0);
+}
 
 static void kputchar(char c, bool to_vga, bool to_serial) {
     if (to_vga)    vga_putchar(c);
     if (to_serial) {
         if (c == '\n') serial_putchar('\r');
         serial_putchar(c);
+    }
+    if (boot_log_on && boot_log_len < BOOT_LOG_MAX) {
+        /* Skip the synthetic CR we insert for serial only; keep
+           LF-only in the file log so editors read it cleanly. */
+        boot_log_buf[boot_log_len++] = c;
     }
 }
 

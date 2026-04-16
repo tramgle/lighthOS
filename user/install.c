@@ -1,6 +1,10 @@
 /* Install user binaries from the ramfs /bin into /disk/bin so they
-   survive across reboots. Expects /disk to already be mounted (the
-   kernel mounts the ATA disk automatically when present). */
+   survive across reboots. Dev-flow tool: assumes a ramfs boot (ISO)
+   with a FAT disk mounted at /disk — you can then rebuild, boot the
+   bootdisk image, and the installed system sees / as the FAT root.
+   The primary install path is now `make docker-disk` on the host,
+   which mcopy's directly; this binary is the fallback for in-QEMU
+   installs. No more chroot — the post-install flow is just reboot. */
 
 #include "syscall.h"
 #include "ulib.h"
@@ -8,8 +12,8 @@
 #define CHUNK 4096
 
 static int file_exists(const char *path) {
-    unsigned char st[64];
-    return sys_stat(path, st) == 0;
+    struct vfs_stat st;
+    return sys_stat(path, &st) == 0;
 }
 
 static int copy_file(const char *src, const char *dst) {
@@ -54,7 +58,7 @@ int main(int argc, char **argv) {
 
     puts("Installing /bin/* -> /disk/bin/*\n");
 
-    char name[64];
+    char name[VFS_MAX_NAME];
     uint32_t type;
     uint32_t copied = 0, failed = 0;
     for (uint32_t i = 0; sys_readdir("/bin", i, name, &type) == 0; i++) {
@@ -77,5 +81,36 @@ int main(int argc, char **argv) {
     }
 
     printf("Installed %u files, %u failures\n", copied, failed);
-    return failed ? 1 : 0;
+    if (failed) return 1;
+
+    /* Also copy /lib/*.so.1 — the dynamic linker runtime needs it
+       once the majority of /bin is dynamic. Missing on an ISO that
+       doesn't ship ld.so yet, so the loop silently skips absent
+       sources. */
+    if (!file_exists("/disk/lib")) {
+        if (sys_mkdir("/disk/lib") != 0) { /* probably already exists */ }
+    }
+    if (file_exists("/lib")) {
+        puts("Installing /lib/* -> /disk/lib/*\n");
+        char lname[VFS_MAX_NAME];
+        uint32_t ltype;
+        uint32_t lcopied = 0;
+        for (uint32_t i = 0; sys_readdir("/lib", i, lname, &ltype) == 0; i++) {
+            if (ltype != 1) continue;
+            char src[128], dst[128];
+            int p = 0;
+            for (const char *s = "/lib/"; *s; s++) src[p++] = *s;
+            for (int j = 0; lname[j] && p < 126; j++) src[p++] = lname[j];
+            src[p] = '\0';
+            p = 0;
+            for (const char *s = "/disk/lib/"; *s; s++) dst[p++] = *s;
+            for (int j = 0; lname[j] && p < 126; j++) dst[p++] = lname[j];
+            dst[p] = '\0';
+            if (copy_file(src, dst) == 0) lcopied++;
+        }
+        printf("  %u runtime files installed\n", lcopied);
+    }
+
+    puts("Install complete. Reboot from the disk to run it.\n");
+    return 0;
 }

@@ -110,12 +110,16 @@ static registers_t *serial_callback(registers_t *regs) {
 
         if (c == 0x1B) { esc_state = 1; continue; }
 
-        /* Ctrl-C (0x03) — send SIGINT to the foreground process
-           instead of enqueueing the raw byte. The byte is still
-           discarded from user input even when there's no kill-able
-           foreground, which matches how real terminals behave. */
+        /* Ctrl-C (0x03) — send SIGINT to the foreground group.
+           Ctrl-Z (0x1A) — send SIGSTOP to the foreground group so
+           the shell can reclaim the terminal and manage the stopped
+           job. Raw bytes are swallowed either way. */
         if (c == 0x03) {
             process_kill_foreground();
+            continue;
+        }
+        if (c == 0x1A) {
+            process_stop_foreground();
             continue;
         }
 

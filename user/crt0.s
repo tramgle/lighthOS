@@ -3,11 +3,16 @@ extern main
 
 section .text
 _start:
-    ; Kernel sets up [esp]=argc, [esp+4]=argv before jumping to us.
-    ; Convert to the standard C calling convention by pushing argv then
-    ; argc onto the stack before calling main(argc, argv).
+    ; SysV stack layout at entry:
+    ;   [esp+0]        = argc
+    ;   [esp+4]        = argv[0]   (first element of the argv array)
+    ;   ...
+    ;   [esp+4+4*argc] = NULL       (argv terminator)
+    ;                    envp NULL, then auxv pairs, then AT_NULL,0
+    ; Compute argv as the address of argv[0] (lea, not mov), then
+    ; push argv/argc for the C calling convention and call main.
     mov eax, [esp]          ; argc
-    mov edx, [esp + 4]      ; argv
+    lea edx, [esp + 4]      ; argv = &argv[0]
     push edx                ; second arg: argv
     push eax                ; first arg: argc
     call main

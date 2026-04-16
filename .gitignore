@@ -1,2 +1,16 @@
-build
-build/*
+# All build artifacts live under build/ — object files, user binaries,
+# sysroot, disk images, bootdisk.img, ISOs.
+build/
+
+# Per-user Claude Code local settings and scheduler state.
+.claude/
+
+# Legacy paths from the pre-migration layout. Safe to remove once no
+# one's branches still have files here. Keep for now so stray object
+# files don't sneak into commits during the transition.
+user/*.o
+user/*.pic.o
+user/libc/*.o
+user/libc/*.pic.o
+user/ldso/*.o
+disk.img

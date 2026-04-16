@@ -165,3 +165,51 @@ int printf(const char *fmt, ...) {
     va_end(args);
     return count;
 }
+
+/* ---- Signal handling ---------------------------------------------
+   Architecture: the kernel's SYS_SIGNAL registers a raw function
+   address and, on delivery, builds a [retaddr=0][signo] frame on the
+   user stack and sets EIP to that address. So we hand the kernel a
+   single shared trampoline (`_ulib_sig_thunk`) that grabs signo from
+   4(%esp), dispatches through a per-process table, then calls
+   sys_sigreturn to restore the pre-handler state. This lets user code
+   register plain `void f(int)` handlers without caring about the
+   trampoline convention. */
+
+static sighandler_t _user_sighandlers[NSIG_USER];
+
+/* Entry point the kernel jumps to on signal delivery. The kernel sets
+   up the user stack as [retaddr=0][signo] so a normal cdecl-callable
+   function sees its argument in the usual place. noinline+used keeps
+   the body around — its address is stored via an int cast, which
+   dead-code elimination would otherwise drop. */
+__attribute__((noinline, used))
+static void _ulib_sig_thunk(int signo) {
+    if (signo >= 0 && signo < NSIG_USER && _user_sighandlers[signo]) {
+        sighandler_t h = _user_sighandlers[signo];
+        if (h != SIG_IGN && h != SIG_DFL) h(signo);
+    }
+    sys_sigreturn();  /* never returns */
+}
+
+sighandler_t signal(int signo, sighandler_t handler) {
+    if (signo < 0 || signo >= NSIG_USER) return SIG_ERR;
+    sighandler_t prev = _user_sighandlers[signo];
+    _user_sighandlers[signo] = handler;
+
+    /* Kernel-side disposition: SIG_DFL/SIG_IGN pass straight through
+       (the kernel interprets 0 and 1 specially and never calls the
+       trampoline for them). Anything else uses our thunk. */
+    uint32_t karg;
+    if (handler == SIG_DFL) karg = 0;
+    else if (handler == SIG_IGN) karg = 1;
+    else karg = (uint32_t)_ulib_sig_thunk;
+
+    int32_t rc = sys_signal(signo, (void (*)(int))karg);
+    if (rc < 0) {
+        /* Kernel rejected (uncatchable or invalid) — roll back. */
+        _user_sighandlers[signo] = prev;
+        return SIG_ERR;
+    }
+    return prev ? prev : SIG_DFL;
+}
