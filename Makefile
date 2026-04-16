@@ -560,6 +560,28 @@ bootdisk: build/mbr.bin build/stage2.bin $(KERNEL_BIN) $(DISK_IMG)
 	dd if=$(KERNEL_BIN) of=build/bootdisk.img bs=512 seek=63 conv=notrunc status=none
 	@echo "bootdisk.img ready — boot with 'make run-bootdisk'"
 
+# Kernel-only bootdisk: skip the FAT partition entirely. Useful for
+# L6 smoke-testing the MBR + stage2 + ELF64 loader without the full
+# user/ build. Produces a 1 MiB image: LBA 0 = MBR, LBA 1..62 =
+# stage2, LBA 63..2047 = kernel ELF, rest zero.
+bootdisk-bare: build/mbr.bin build/stage2.bin $(KERNEL_BIN)
+	@mkdir -p build
+	dd if=/dev/zero of=build/bootdisk-bare.img bs=1M count=1 status=none
+	dd if=build/mbr.bin    of=build/bootdisk-bare.img bs=512 seek=0  conv=notrunc status=none
+	dd if=build/stage2.bin of=build/bootdisk-bare.img bs=512 seek=1  conv=notrunc status=none
+	dd if=$(KERNEL_BIN)    of=build/bootdisk-bare.img bs=512 seek=63 conv=notrunc status=none
+	@echo "bootdisk-bare.img ready"
+
+docker-bootdisk-bare:
+	$(DOCKER_RUN) make bootdisk-bare
+
+run-bootdisk-bare: docker-bootdisk-bare
+	qemu-system-x86_64 -drive file=build/bootdisk-bare.img,format=raw,if=ide \
+	    -display none -serial file:/tmp/bootdisk.log -m 128M -no-reboot \
+	    -device isa-debug-exit,iobase=0x604,iosize=0x04 \
+	    || true
+	@echo "--- serial log ---"; cat /tmp/bootdisk.log
+
 build/bootdisk.img: bootdisk
 
 docker-bootdisk:
