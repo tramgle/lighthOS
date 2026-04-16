@@ -34,7 +34,15 @@ S_SOURCES = $(shell find src -name '*.s' -not -path 'src/boot/disk/*')
 # The variable PORT_MINIMAL defaults to 1 until the port is done.
 PORT_MINIMAL ?= 1
 ifeq ($(PORT_MINIMAL),1)
-  C_SOURCES := src/kernel/main.c
+  # Sources that have been ported to x86_64 so far. Each milestone
+  # grows this list. When the last file is ported, flip PORT_MINIMAL
+  # back to 0 and delete src/port/shim.c.
+  C_SOURCES := \
+    src/kernel/main.c \
+    src/mm/pmm.c \
+    src/mm/vmm.c \
+    src/lib/string.c \
+    src/port/shim.c
   S_SOURCES := src/boot/boot.s
 endif
 

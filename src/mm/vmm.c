@@ -1,291 +1,383 @@
+/* x86_64 4-level paging.
+ *
+ * Layout after vmm_init:
+ *
+ *   PML4[0]      → identity map of phys [0, 1 GiB), huge pages.
+ *                  Lets the kernel dereference any physical address
+ *                  in the direct-map region by casting it to a
+ *                  pointer — needed because the MMU walks page
+ *                  tables by physical address and the kernel needs
+ *                  to edit those tables.
+ *
+ *   PML4[511]    → kernel text/data at 0xFFFFFFFF80000000, phys 0.
+ *                  Same 1 GiB backing via PDPT_HIGH[510]→PD with
+ *                  huge pages. Mirrors the boot table layout.
+ *
+ * Per-process PML4s allocate from pmm and copy PML4[256..511] from
+ * the kernel PML4 so the higher-half is shared across every task.
+ * User space (PML4[0..255]) is private per process.
+ *
+ * Page-table frames are allocated from the pmm direct-map region
+ * (< 64 MiB) and accessed via the identity map. An allocation
+ * escaping that region is a panic — same invariant as i386 vmm,
+ * scaled up to x86_64.
+ */
+
 #include "mm/vmm.h"
 #include "mm/pmm.h"
 #include "lib/string.h"
 #include "lib/kprintf.h"
 #include "kernel/panic.h"
 
-/* Forward declaration: pulled from task.c without a header dependency so
-   mm/ doesn't bleed into kernel/ at the include level. Returns NULL when
-   the task system hasn't been initialised yet (e.g. during vmm_init). */
+/* Task-system forward decls (kept out of the header to avoid a
+   circular include between mm/ and kernel/). */
 struct task;
-extern struct task *task_current(void);
-extern uint32_t     *task_current_pd(void);
+extern struct task  *task_current(void);
+extern uint64_t     *task_current_pml4(void);
 
-/* Kernel page directory: 1024 entries. Always present; every other PD
-   copies its first four entries verbatim to inherit the identity map. */
-static uint32_t page_directory[1024] __attribute__((aligned(4096)));
+/* The live kernel PML4. Allocated at vmm_init time from pmm so its
+   phys == virt (identity-mapped), which is also what CR3 needs. */
+static uint64_t *kernel_pml4;
+static uint64_t  kernel_pml4_phys;
+static uint64_t *current_cr3;
 
-/* Pre-allocated static page tables for the first 16MB (4 tables × 4MB).
-   These are SHARED by every process PD — the kernel map is the same
-   everywhere. */
-static uint32_t page_tables[4][1024] __attribute__((aligned(4096)));
-
-/* Cached CR3 so we can skip no-op writes. */
-static uint32_t *current_cr3;
-
-/* All kernel-addressable memory lives in the first 16MB (the identity-
-   mapped region). Allocations above that boundary can't be zeroed or
-   read directly by kernel code. Enforce loudly rather than silently
-   corrupting state. */
-#define KERNEL_DIRECT_MAP_LIMIT 0x01000000u
-
-static void check_low(const char *what, uint32_t frame) {
-    if (frame >= KERNEL_DIRECT_MAP_LIMIT) {
-        kprintf("vmm: %s produced frame 0x%x above 16MB\n", what, frame);
-        panic("vmm: frame allocation escaped identity-mapped region");
+static void check_low(const char *what, uint64_t phys) {
+    if (phys >= KERNEL_DIRECT_MAP_LIMIT) {
+        kprintf("vmm: %s produced phys 0x%x above direct-map limit\n",
+                what, (uint32_t)phys);
+        panic("vmm: frame allocation escaped direct-map region");
     }
+}
+
+/* Index extractors for the four paging levels. */
+static inline uint32_t pml4_idx(uint64_t va) { return (va >> 39) & 0x1FF; }
+static inline uint32_t pdpt_idx(uint64_t va) { return (va >> 30) & 0x1FF; }
+static inline uint32_t pd_idx  (uint64_t va) { return (va >> 21) & 0x1FF; }
+static inline uint32_t pt_idx  (uint64_t va) { return (va >> 12) & 0x1FF; }
+
+static inline uint64_t *entry_to_table(uint64_t entry) {
+    return (uint64_t *)(uintptr_t)(entry & PTE_ADDR_MASK);
+}
+
+static uint64_t alloc_table(const char *what) {
+    uint64_t phys = pmm_alloc_frame();
+    if (!phys) {
+        kprintf("vmm: out of memory for %s\n", what);
+        panic("vmm: pmm_alloc_frame failed");
+    }
+    check_low(what, phys);
+    memset(phys_to_virt_low(phys), 0, PAGE_SIZE);
+    return phys;
+}
+
+/* Ensure a full PML4→PDPT→PD→PT chain exists for `va`, then return
+   a pointer to the PT entry. If `user` is set, the intermediate
+   entries have USER bit set so ring 3 can traverse them. */
+static uint64_t *walk_create(uint64_t *pml4, uint64_t va, int user) {
+    uint64_t mid_flags = VMM_FLAG_PRESENT | VMM_FLAG_WRITE;
+    if (user) mid_flags |= VMM_FLAG_USER;
+
+    uint64_t *pml4e = &pml4[pml4_idx(va)];
+    if (!(*pml4e & VMM_FLAG_PRESENT)) {
+        uint64_t phys = alloc_table("pdpt");
+        *pml4e = phys | mid_flags;
+    } else if (user) {
+        *pml4e |= VMM_FLAG_USER;
+    }
+    uint64_t *pdpt = entry_to_table(*pml4e);
+
+    uint64_t *pdpte = &pdpt[pdpt_idx(va)];
+    if (!(*pdpte & VMM_FLAG_PRESENT)) {
+        uint64_t phys = alloc_table("pd");
+        *pdpte = phys | mid_flags;
+    } else if (user) {
+        *pdpte |= VMM_FLAG_USER;
+    }
+    if (*pdpte & VMM_FLAG_HUGE) return NULL;    /* 1 GiB page */
+    uint64_t *pd = entry_to_table(*pdpte);
+
+    uint64_t *pde = &pd[pd_idx(va)];
+    if (!(*pde & VMM_FLAG_PRESENT)) {
+        uint64_t phys = alloc_table("pt");
+        *pde = phys | mid_flags;
+    } else if (user) {
+        *pde |= VMM_FLAG_USER;
+    }
+    if (*pde & VMM_FLAG_HUGE) return NULL;      /* 2 MiB page */
+    uint64_t *pt = entry_to_table(*pde);
+
+    return &pt[pt_idx(va)];
+}
+
+/* Walk without allocating; returns NULL on any missing level. */
+static uint64_t *walk_lookup(uint64_t *pml4, uint64_t va) {
+    uint64_t e = pml4[pml4_idx(va)];
+    if (!(e & VMM_FLAG_PRESENT)) return NULL;
+    uint64_t *pdpt = entry_to_table(e);
+    e = pdpt[pdpt_idx(va)];
+    if (!(e & VMM_FLAG_PRESENT)) return NULL;
+    if (e & VMM_FLAG_HUGE) return NULL;
+    uint64_t *pd = entry_to_table(e);
+    e = pd[pd_idx(va)];
+    if (!(e & VMM_FLAG_PRESENT)) return NULL;
+    if (e & VMM_FLAG_HUGE) return NULL;
+    uint64_t *pt = entry_to_table(e);
+    return &pt[pt_idx(va)];
+}
+
+/* Install a 2 MiB huge page in `pd_table` at slot `pd_i`. */
+static void install_huge_2m(uint64_t *pd_table, uint32_t pd_i,
+                            uint64_t phys, uint64_t flags) {
+    pd_table[pd_i] = (phys & ~(uint64_t)0x1FFFFF)
+                   | flags | VMM_FLAG_PRESENT | VMM_FLAG_HUGE;
 }
 
 void vmm_init(void) {
-    memset(page_directory, 0, sizeof(page_directory));
+    /* Build the kernel PML4 from pmm'd frames. We replace boot.s's
+       bootstrap tables entirely. */
+    kernel_pml4_phys = alloc_table("kernel pml4");
+    kernel_pml4 = (uint64_t *)phys_to_virt_low(kernel_pml4_phys);
 
-    /* Identity map first 16MB using the pre-allocated page tables. */
-    for (int i = 0; i < 4; i++) {
-        for (int j = 0; j < 1024; j++) {
-            uint32_t phys = (i * 1024 + j) * PAGE_SIZE;
-            page_tables[i][j] = phys | VMM_FLAG_PRESENT | VMM_FLAG_WRITE;
-        }
-        page_directory[i] = (uint32_t)&page_tables[i] | VMM_FLAG_PRESENT | VMM_FLAG_WRITE;
+    /* PML4[0]: identity map of phys [0, 1 GiB) via one PDPT with
+       one PD of 512 × 2 MiB huge pages. */
+    uint64_t pdpt_low_phys = alloc_table("pdpt_low");
+    uint64_t pd_low_phys   = alloc_table("pd_low");
+    uint64_t *pdpt_low = phys_to_virt_low(pdpt_low_phys);
+    uint64_t *pd_low   = phys_to_virt_low(pd_low_phys);
+
+    pdpt_low[0] = pd_low_phys | VMM_FLAG_PRESENT | VMM_FLAG_WRITE;
+    for (uint32_t i = 0; i < 512; i++) {
+        install_huge_2m(pd_low, i,
+                        (uint64_t)i * 0x200000ULL,
+                        VMM_FLAG_WRITE | VMM_FLAG_GLOBAL);
     }
+    kernel_pml4[0] = pdpt_low_phys | VMM_FLAG_PRESENT | VMM_FLAG_WRITE;
 
-    /* Load page directory into CR3 */
-    __asm__ volatile ("mov %0, %%cr3" :: "r"(page_directory));
-    current_cr3 = page_directory;
+    /* PML4[511]: higher-half kernel image. Same 1 GiB of phys, but
+       at VMA 0xFFFFFFFF80000000. Use PDPT[510] (since bits 30..38
+       of 0xFFFFFFFF80000000 are 510). We can reuse pd_low — both
+       views point at the same physical memory. */
+    uint64_t pdpt_high_phys = alloc_table("pdpt_high");
+    uint64_t *pdpt_high = phys_to_virt_low(pdpt_high_phys);
+    pdpt_high[510] = pd_low_phys | VMM_FLAG_PRESENT | VMM_FLAG_WRITE;
+    kernel_pml4[511] = pdpt_high_phys | VMM_FLAG_PRESENT | VMM_FLAG_WRITE;
 
-    /* Enable paging */
-    uint32_t cr0;
-    __asm__ volatile ("mov %%cr0, %0" : "=r"(cr0));
-    cr0 |= 0x80000000;
-    __asm__ volatile ("mov %0, %%cr0" :: "r"(cr0));
+    /* Load CR3 with the physical address of the new PML4. The
+       higher-half mapping is equivalent to the boot tables, so the
+       instruction after the mov executes normally. */
+    __asm__ volatile ("mov %0, %%cr3" :: "r"(kernel_pml4_phys) : "memory");
+    current_cr3 = kernel_pml4;
 
-    serial_printf("[vmm] Paging enabled, first 16MB identity-mapped\n");
+    serial_printf("[vmm] 4-level paging online. "
+                  "pml4@0x%x identity-map=1GiB kernel@0xFFFFFFFF80000000\n",
+                  (uint32_t)kernel_pml4_phys);
 }
 
-uint32_t *vmm_kernel_pd(void) {
-    return page_directory;
+uint64_t *vmm_kernel_pml4(void) { return kernel_pml4; }
+
+static uint64_t *default_pml4(void) {
+    uint64_t *p = task_current_pml4();
+    return p ? p : kernel_pml4;
 }
 
-/* Resolve the PD that kernel callers implicitly target. Before task
-   init we use the kernel PD; after, we defer to the running task. */
-static uint32_t *default_pd(void) {
-    uint32_t *pd = task_current_pd();
-    return pd ? pd : page_directory;
-}
-
-void vmm_map_in(uint32_t *pd, uint32_t virt, uint32_t phys, uint32_t flags) {
-    uint32_t pd_idx = virt >> 22;
-    uint32_t pt_idx = (virt >> 12) & 0x3FF;
-
-    if (!(pd[pd_idx] & VMM_FLAG_PRESENT)) {
-        uint32_t pt_phys = pmm_alloc_frame();
-        if (!pt_phys) {
-            kprintf("vmm: out of memory for page table\n");
-            return;
-        }
-        check_low("page-table alloc", pt_phys);
-        memset((void *)pt_phys, 0, PAGE_SIZE);
-        pd[pd_idx] = pt_phys | VMM_FLAG_PRESENT | VMM_FLAG_WRITE | (flags & VMM_FLAG_USER);
-    } else if (flags & VMM_FLAG_USER) {
-        pd[pd_idx] |= VMM_FLAG_USER;
+void vmm_map_in(uint64_t *pml4, uint64_t virt, uint64_t phys, uint64_t flags) {
+    int user = (flags & VMM_FLAG_USER) ? 1 : 0;
+    uint64_t *pte = walk_create(pml4, virt, user);
+    if (!pte) {
+        kprintf("vmm_map_in: cannot map 0x%x..0x%x — huge page in the way\n",
+                (uint32_t)(virt >> 32), (uint32_t)virt);
+        return;
     }
+    *pte = (phys & PTE_ADDR_MASK)
+         | (flags & 0xFFF)
+         | (flags & VMM_FLAG_NX)
+         | VMM_FLAG_PRESENT;
 
-    uint32_t *pt = (uint32_t *)(pd[pd_idx] & 0xFFFFF000);
-    pt[pt_idx] = (phys & 0xFFFFF000) | (flags & 0xFFF) | VMM_FLAG_PRESENT;
-
-    /* Only invalidate the TLB when the mapping we just wrote is the
-       one the CPU will use on the next access. Mapping into another
-       process's PD doesn't affect our TLB. */
-    if (pd == current_cr3) {
+    if (pml4 == current_cr3) {
         __asm__ volatile ("invlpg (%0)" :: "r"(virt) : "memory");
     }
 }
 
-void vmm_unmap_in(uint32_t *pd, uint32_t virt) {
-    uint32_t pd_idx = virt >> 22;
-    uint32_t pt_idx = (virt >> 12) & 0x3FF;
-
-    if (!(pd[pd_idx] & VMM_FLAG_PRESENT)) return;
-
-    uint32_t *pt = (uint32_t *)(pd[pd_idx] & 0xFFFFF000);
-    pt[pt_idx] = 0;
-
-    if (pd == current_cr3) {
+void vmm_unmap_in(uint64_t *pml4, uint64_t virt) {
+    uint64_t *pte = walk_lookup(pml4, virt);
+    if (!pte) return;
+    *pte = 0;
+    if (pml4 == current_cr3) {
         __asm__ volatile ("invlpg (%0)" :: "r"(virt) : "memory");
     }
 }
 
-uint32_t vmm_get_physical_in(uint32_t *pd, uint32_t virt) {
-    uint32_t pd_idx = virt >> 22;
-    uint32_t pt_idx = (virt >> 12) & 0x3FF;
-
-    if (!(pd[pd_idx] & VMM_FLAG_PRESENT)) return 0;
-
-    uint32_t *pt = (uint32_t *)(pd[pd_idx] & 0xFFFFF000);
-    if (!(pt[pt_idx] & VMM_FLAG_PRESENT)) return 0;
-
-    return (pt[pt_idx] & 0xFFFFF000) | (virt & 0xFFF);
+uint64_t vmm_get_physical_in(uint64_t *pml4, uint64_t virt) {
+    uint64_t *pte = walk_lookup(pml4, virt);
+    if (!pte || !(*pte & VMM_FLAG_PRESENT)) return 0;
+    return (*pte & PTE_ADDR_MASK) | (virt & 0xFFF);
 }
 
-int vmm_set_flags_in(uint32_t *pd, uint32_t virt, uint32_t flags) {
-    uint32_t pd_idx = virt >> 22;
-    uint32_t pt_idx = (virt >> 12) & 0x3FF;
-
-    if (!(pd[pd_idx] & VMM_FLAG_PRESENT)) return -1;
-    uint32_t *pt = (uint32_t *)(pd[pd_idx] & 0xFFFFF000);
-    if (!(pt[pt_idx] & VMM_FLAG_PRESENT)) return -1;
-
-    /* Preserve the physical frame (high 20 bits); rewrite the low 12
-       bits of the PTE with the requested flags. PRESENT is forced so
-       an mprotect(PROT_READ) doesn't accidentally clear the mapping. */
-    pt[pt_idx] = (pt[pt_idx] & 0xFFFFF000) | (flags & 0xFFF) | VMM_FLAG_PRESENT;
-
-    if (pd == current_cr3) {
+int vmm_set_flags_in(uint64_t *pml4, uint64_t virt, uint64_t flags) {
+    uint64_t *pte = walk_lookup(pml4, virt);
+    if (!pte || !(*pte & VMM_FLAG_PRESENT)) return -1;
+    *pte = (*pte & PTE_ADDR_MASK)
+         | (flags & 0xFFF)
+         | (flags & VMM_FLAG_NX)
+         | VMM_FLAG_PRESENT;
+    if (pml4 == current_cr3) {
         __asm__ volatile ("invlpg (%0)" :: "r"(virt) : "memory");
     }
     return 0;
 }
 
-void vmm_map_page(uint32_t virt, uint32_t phys, uint32_t flags) {
-    vmm_map_in(default_pd(), virt, phys, flags);
+void     vmm_map_page(uint64_t virt, uint64_t phys, uint64_t flags) {
+    vmm_map_in(default_pml4(), virt, phys, flags);
 }
 
-void vmm_unmap_page(uint32_t virt) {
-    vmm_unmap_in(default_pd(), virt);
+void     vmm_unmap_page(uint64_t virt) {
+    vmm_unmap_in(default_pml4(), virt);
 }
 
-uint32_t vmm_get_physical(uint32_t virt) {
-    return vmm_get_physical_in(default_pd(), virt);
+uint64_t vmm_get_physical(uint64_t virt) {
+    return vmm_get_physical_in(default_pml4(), virt);
 }
 
-uint32_t *vmm_new_pd(void) {
-    uint32_t frame = pmm_alloc_frame();
-    if (!frame) {
-        kprintf("vmm: out of memory for page directory\n");
-        return NULL;
+uint64_t *vmm_new_pml4(void) {
+    uint64_t phys = pmm_alloc_frame();
+    if (!phys) { kprintf("vmm_new_pml4: OOM\n"); return NULL; }
+    check_low("new pml4", phys);
+    uint64_t *p = phys_to_virt_low(phys);
+    memset(p, 0, PAGE_SIZE);
+    /* Inherit kernel half (PML4[256..511]) by copy of entries.
+       Sharing at this level means every process sees the same
+       identity map + higher-half kernel; user space is private. */
+    for (int i = 256; i < 512; i++) {
+        p[i] = kernel_pml4[i];
     }
-    check_low("pd alloc", frame);
-    uint32_t *pd = (uint32_t *)frame;
-    memset(pd, 0, PAGE_SIZE);
-    /* Share the kernel's static page-tables for the first 16MB so every
-       process has the kernel identity-mapped without copying. */
-    for (int i = 0; i < 4; i++) {
-        pd[i] = page_directory[i];
-    }
-    return pd;
+    return p;
 }
 
-void vmm_free_pd(uint32_t *pd) {
-    if (!pd || pd == page_directory) return;
-    /* Kernel PDEs (0..3) point at the shared static tables — leave them. */
-    for (int i = 4; i < 1024; i++) {
-        if (!(pd[i] & VMM_FLAG_PRESENT)) continue;
-        uint32_t pt_phys = pd[i] & 0xFFFFF000;
-        uint32_t *pt = (uint32_t *)pt_phys;
-        for (int j = 0; j < 1024; j++) {
-            if (pt[j] & VMM_FLAG_PRESENT) {
-                pmm_free_frame(pt[j] & 0xFFFFF000);
+static void free_user_subtree(uint64_t *pml4) {
+    for (int i4 = 0; i4 < 256; i4++) {
+        uint64_t e4 = pml4[i4];
+        if (!(e4 & VMM_FLAG_PRESENT)) continue;
+        uint64_t *pdpt = entry_to_table(e4);
+        for (int i3 = 0; i3 < 512; i3++) {
+            uint64_t e3 = pdpt[i3];
+            if (!(e3 & VMM_FLAG_PRESENT)) continue;
+            if (e3 & VMM_FLAG_HUGE) { pmm_free_frame(e3 & PTE_ADDR_MASK); continue; }
+            uint64_t *pd = entry_to_table(e3);
+            for (int i2 = 0; i2 < 512; i2++) {
+                uint64_t e2 = pd[i2];
+                if (!(e2 & VMM_FLAG_PRESENT)) continue;
+                if (e2 & VMM_FLAG_HUGE) { pmm_free_frame(e2 & PTE_ADDR_MASK); continue; }
+                uint64_t *pt = entry_to_table(e2);
+                for (int i1 = 0; i1 < 512; i1++) {
+                    uint64_t e1 = pt[i1];
+                    if (e1 & VMM_FLAG_PRESENT) pmm_free_frame(e1 & PTE_ADDR_MASK);
+                }
+                pmm_free_frame(e2 & PTE_ADDR_MASK);
             }
+            pmm_free_frame(e3 & PTE_ADDR_MASK);
         }
-        pmm_free_frame(pt_phys);
-        pd[i] = 0;
+        pmm_free_frame(e4 & PTE_ADDR_MASK);
+        pml4[i4] = 0;
     }
-    pmm_free_frame((uint32_t)pd);
 }
 
-void vmm_switch_pd(uint32_t *pd) {
-    if (!pd || pd == current_cr3) return;
-    current_cr3 = pd;
-    __asm__ volatile ("mov %0, %%cr3" :: "r"(pd) : "memory");
+void vmm_free_pml4(uint64_t *pml4) {
+    if (!pml4 || pml4 == kernel_pml4) return;
+    free_user_subtree(pml4);
+    /* Kernel half entries belong to kernel_pml4 — do NOT free those
+       frames. Just drop this PML4 page. */
+    uint64_t phys = (uint64_t)(uintptr_t)pml4;
+    pmm_free_frame(phys);
 }
 
-/* --- User-pointer helpers ---
-   Walk the current PD page-by-page. An address is "user safe" only if
-   its PTE has both PRESENT and USER set (and, for writes, WRITE).
-   We do NOT rely on paging to fault-and-recover — the kernel's page
-   fault handler panics today, so we must pre-validate. */
+void vmm_unmap_user_space(uint64_t *pml4) {
+    if (!pml4) return;
+    free_user_subtree(pml4);
+    if (pml4 == current_cr3) {
+        /* Flush TLB by reloading CR3. */
+        uint64_t phys = (uint64_t)(uintptr_t)pml4;
+        __asm__ volatile ("mov %0, %%cr3" :: "r"(phys) : "memory");
+    }
+}
 
-static int page_user_accessible(uint32_t *pd, uint32_t va, int write) {
-    uint32_t pd_idx = va >> 22;
-    uint32_t pt_idx = (va >> 12) & 0x3FF;
-    uint32_t pde = pd[pd_idx];
-    if (!(pde & VMM_FLAG_PRESENT)) return 0;
-    if (!(pde & VMM_FLAG_USER)) return 0;
-    uint32_t *pt = (uint32_t *)(pde & 0xFFFFF000);
-    uint32_t pte = pt[pt_idx];
-    if (!(pte & VMM_FLAG_PRESENT)) return 0;
-    if (!(pte & VMM_FLAG_USER)) return 0;
-    if (write && !(pte & VMM_FLAG_WRITE)) return 0;
+void vmm_switch_pml4(uint64_t *pml4) {
+    if (!pml4 || pml4 == current_cr3) return;
+    current_cr3 = pml4;
+    uint64_t phys = (uint64_t)(uintptr_t)pml4;
+    __asm__ volatile ("mov %0, %%cr3" :: "r"(phys) : "memory");
+}
+
+/* --- User-pointer validation ----------------------------------- */
+
+static int page_user_accessible(uint64_t *pml4, uint64_t va, int write) {
+    uint64_t e = pml4[pml4_idx(va)];
+    if (!(e & VMM_FLAG_PRESENT) || !(e & VMM_FLAG_USER)) return 0;
+    uint64_t *pdpt = entry_to_table(e);
+    e = pdpt[pdpt_idx(va)];
+    if (!(e & VMM_FLAG_PRESENT) || !(e & VMM_FLAG_USER)) return 0;
+    if (e & VMM_FLAG_HUGE) {
+        if (write && !(e & VMM_FLAG_WRITE)) return 0;
+        return 1;
+    }
+    uint64_t *pd = entry_to_table(e);
+    e = pd[pd_idx(va)];
+    if (!(e & VMM_FLAG_PRESENT) || !(e & VMM_FLAG_USER)) return 0;
+    if (e & VMM_FLAG_HUGE) {
+        if (write && !(e & VMM_FLAG_WRITE)) return 0;
+        return 1;
+    }
+    uint64_t *pt = entry_to_table(e);
+    e = pt[pt_idx(va)];
+    if (!(e & VMM_FLAG_PRESENT) || !(e & VMM_FLAG_USER)) return 0;
+    if (write && !(e & VMM_FLAG_WRITE)) return 0;
     return 1;
 }
 
-int user_ptr_ok(const void *ptr, uint32_t len, int write) {
+int user_ptr_ok(const void *ptr, uint64_t len, int write) {
     if (len == 0) return 1;
-    uint32_t *pd = default_pd();
-    if (!pd) return 0;
-    uint32_t start = (uint32_t)ptr;
-    /* Overflow guard: start + len must not wrap. */
+    uint64_t *pml4 = default_pml4();
+    if (!pml4) return 0;
+    uint64_t start = (uint64_t)(uintptr_t)ptr;
     if (start + len < start) return 0;
-    uint32_t first_page = start & ~0xFFFu;
-    uint32_t last_page  = (start + len - 1) & ~0xFFFu;
-    for (uint32_t va = first_page; ; va += PAGE_SIZE) {
-        if (!page_user_accessible(pd, va, write)) return 0;
-        if (va == last_page) break;
+    uint64_t first = start & ~(uint64_t)0xFFF;
+    uint64_t last  = (start + len - 1) & ~(uint64_t)0xFFF;
+    for (uint64_t va = first; ; va += PAGE_SIZE) {
+        if (!page_user_accessible(pml4, va, write)) return 0;
+        if (va == last) break;
     }
     return 1;
 }
 
-int32_t copy_from_user(void *kdst, const void *usrc, uint32_t n) {
+int32_t copy_from_user(void *kdst, const void *usrc, uint64_t n) {
     if (!user_ptr_ok(usrc, n, 0)) return -1;
-    memcpy(kdst, usrc, n);
+    memcpy(kdst, usrc, (uint32_t)n);
     return (int32_t)n;
 }
 
-int32_t copy_to_user(void *udst, const void *ksrc, uint32_t n) {
+int32_t copy_to_user(void *udst, const void *ksrc, uint64_t n) {
     if (!user_ptr_ok(udst, n, 1)) return -1;
-    memcpy(udst, ksrc, n);
+    memcpy(udst, ksrc, (uint32_t)n);
     return (int32_t)n;
 }
 
-int32_t strncpy_from_user(char *kdst, const char *usrc, uint32_t max) {
+int32_t strncpy_from_user(char *kdst, const char *usrc, uint64_t max) {
     if (max == 0) return -1;
-    uint32_t *pd = default_pd();
-    if (!pd) return -1;
-    uint32_t i = 0;
-    uint32_t last_page_checked = 0xFFFFFFFFu;
+    uint64_t *pml4 = default_pml4();
+    if (!pml4) return -1;
+    uint64_t i = 0;
+    uint64_t last_page_checked = (uint64_t)-1;
     while (i < max - 1) {
-        uint32_t va = (uint32_t)usrc + i;
-        /* Re-check the page when we cross a boundary. */
-        uint32_t page = va & ~0xFFFu;
+        uint64_t va = (uint64_t)(uintptr_t)usrc + i;
+        uint64_t page = va & ~(uint64_t)0xFFF;
         if (page != last_page_checked) {
-            if (!page_user_accessible(pd, page, 0)) return -1;
+            if (!page_user_accessible(pml4, page, 0)) return -1;
             last_page_checked = page;
         }
-        char c = *((const char *)va);
+        char c = *((const char *)(uintptr_t)va);
         kdst[i] = c;
         if (c == '\0') return (int32_t)i;
         i++;
     }
-    /* Ran off the end without finding NUL. */
     kdst[max - 1] = '\0';
     return -1;
-}
-
-void vmm_unmap_user_space(uint32_t *pd) {
-    if (!pd) return;
-    for (int i = 4; i < 1024; i++) {
-        if (!(pd[i] & VMM_FLAG_PRESENT)) continue;
-        uint32_t pt_phys = pd[i] & 0xFFFFF000;
-        uint32_t *pt = (uint32_t *)pt_phys;
-        for (int j = 0; j < 1024; j++) {
-            if (pt[j] & VMM_FLAG_PRESENT) {
-                pmm_free_frame(pt[j] & 0xFFFFF000);
-            }
-        }
-        pmm_free_frame(pt_phys);
-        pd[i] = 0;
-    }
-    /* Reload CR3 to flush the TLB if this PD is live. */
-    if (pd == current_cr3) {
-        __asm__ volatile ("mov %0, %%cr3" :: "r"(pd) : "memory");
-    }
 }
