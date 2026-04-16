@@ -28,8 +28,52 @@
 #include "kernel/timer.h"
 #include "drivers/vga.h"
 #include "drivers/serial.h"
+#include "fs/vfs.h"
+#include "fs/ramfs.h"
 
 extern char stack_top;
+
+/* Pull each multiboot module into ramfs at the path given by its
+   cmdline. GRUB entries like
+       module /boot/hello  /bin/hello
+   become a file at /bin/hello with the module bytes as contents.
+   Missing cmdlines fall back to /mod<N>. */
+static void populate_ramfs_from_modules(multiboot_info_t *mbi) {
+    if (!(mbi->flags & MULTIBOOT_FLAG_MODS)) return;
+    multiboot_mod_t *mods = (multiboot_mod_t *)phys_to_virt_low(mbi->mods_addr);
+    for (uint32_t i = 0; i < mbi->mods_count; i++) {
+        const char *cmdline = mods[i].cmdline
+            ? (const char *)phys_to_virt_low(mods[i].cmdline)
+            : "/mod";
+        /* Some loaders prepend the module filename before the user
+           cmdline separated by a space — take the first whitespace-
+           delimited token as the target path. */
+        char path[VFS_MAX_PATH];
+        int pi = 0;
+        if (cmdline[0] != '/') path[pi++] = '/';
+        for (int j = 0; cmdline[j] && cmdline[j] != ' ' && pi < VFS_MAX_PATH - 1; j++) {
+            path[pi++] = cmdline[j];
+        }
+        path[pi] = 0;
+
+        /* Ensure parent directories exist — support one level for now. */
+        for (int j = 1; j < pi; j++) {
+            if (path[j] == '/') {
+                char saved = path[j];
+                path[j] = 0;
+                struct vfs_stat dst;
+                if (vfs_stat(path, &dst) != 0) vfs_mkdir(path);
+                path[j] = saved;
+            }
+        }
+
+        void *bytes = (void *)phys_to_virt_low(mods[i].mod_start);
+        uint64_t size = (uint64_t)(mods[i].mod_end - mods[i].mod_start);
+        vfs_create(path, VFS_FILE);
+        vfs_write(path, bytes, (size_t)size, 0);
+        kprintf("[mod] registered %s (%lu bytes)\n", path, size);
+    }
+}
 
 static void *multiboot_first_module(multiboot_info_t *mbi, uint64_t *size_out) {
     if (!(mbi->flags & MULTIBOOT_FLAG_MODS) || mbi->mods_count == 0) return 0;
@@ -82,6 +126,13 @@ void kernel_main(uint32_t magic, multiboot_info_t *mbi) {
 
     task_init();
     process_init();
+
+    /* Bring up a ramfs at '/' and stage every multiboot module
+       into it at its cmdline-declared path. */
+    vfs_init();
+    vfs_node_t *ramroot = ramfs_init();
+    if (ramroot) vfs_mount("/", ramroot->ops, ramroot, 0);
+    populate_ramfs_from_modules(mbi);
 
     /* Spawn the first multiboot module as the init process. */
     uint64_t mod_size = 0;

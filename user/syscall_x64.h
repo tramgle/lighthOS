@@ -21,12 +21,36 @@
 #define SYS_EXIT     1
 #define SYS_READ     3
 #define SYS_WRITE    4
+#define SYS_OPEN     5
+#define SYS_CLOSE    6
 #define SYS_WAITPID  7
+#define SYS_UNLINK  10
+#define SYS_STAT    18
+#define SYS_LSEEK   19
 #define SYS_GETPID  20
 #define SYS_YIELD   24
+#define SYS_MKDIR   39
 #define SYS_FORK    57
+#define SYS_READDIR 89
 #define SYS_SPAWN  120
 #define SYS_SHUTDOWN 201
+#define SYS_TIME    214
+
+#define O_RDONLY 0x00
+#define O_WRONLY 0x01
+#define O_RDWR   0x02
+#define O_CREAT  0x40
+#define O_TRUNC  0x200
+#define O_APPEND 0x400
+
+#define VFS_FILE 1
+#define VFS_DIR  2
+
+struct vfs_stat {
+    uint32_t inode;
+    uint32_t type;
+    uint32_t size;
+};
 
 static inline long _syscall0(long num) {
     long ret;
@@ -63,6 +87,19 @@ static inline long sys_waitpid(int pid, int *status) {
 }
 static inline void sys_shutdown(void)          { _syscall0(SYS_SHUTDOWN); }
 static inline long sys_fork(void)               { return _syscall0(SYS_FORK); }
+static inline long sys_open(const char *path, long flags) {
+    return _syscall2(SYS_OPEN, (long)(uintptr_t)path, flags);
+}
+static inline long sys_close(int fd)             { return _syscall1(SYS_CLOSE, fd); }
+static inline long sys_stat(const char *path, struct vfs_stat *st) {
+    return _syscall2(SYS_STAT, (long)(uintptr_t)path, (long)(uintptr_t)st);
+}
+static inline long sys_unlink(const char *path)  { return _syscall1(SYS_UNLINK, (long)(uintptr_t)path); }
+static inline long sys_mkdir(const char *path)   { return _syscall1(SYS_MKDIR, (long)(uintptr_t)path); }
+static inline long sys_lseek(int fd, long off, int whence) {
+    return _syscall3(SYS_LSEEK, fd, off, whence);
+}
+static inline long sys_time(void)                { return _syscall0(SYS_TIME); }
 
 static inline size_t ustrlen(const char *s) {
     size_t n = 0; while (s[n]) n++; return n;

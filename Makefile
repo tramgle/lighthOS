@@ -57,7 +57,9 @@ ifeq ($(PORT_MINIMAL),1)
     src/lib/string.c \
     src/lib/kprintf.c \
     src/drivers/vga.c \
-    src/drivers/serial.c
+    src/drivers/serial.c \
+    src/fs/vfs.c \
+    src/fs/ramfs.c
   S_SOURCES := \
     src/boot/boot.s \
     src/kernel/gdt_flush.s \

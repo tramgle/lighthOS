@@ -24,6 +24,8 @@
 #include "mm/pmm.h"
 #include "lib/string.h"
 #include "lib/kprintf.h"
+#include "drivers/serial.h"
+#include "fs/vfs.h"
 
 #define USER_STACK_TOP 0x0000000000800000ULL
 #define USER_STACK_PAGES 4
@@ -384,6 +386,119 @@ int process_execve_from_memory(registers_t *regs, const char *name,
     regs->r12 = regs->r13 = regs->r14 = regs->r15 = 0;
 
     return 0;
+}
+
+/* --- File descriptor plumbing -------------------------------- */
+
+static fd_entry_t *current_fds(void) {
+    process_t *p = process_current();
+    return p ? p->fds : 0;
+}
+
+int fd_open(const char *path, uint32_t flags) {
+    fd_entry_t *fds = current_fds();
+    if (!fds) return -1;
+
+    struct vfs_stat st;
+    int exists = vfs_stat(path, &st) == 0;
+    if (!exists) {
+        if (!(flags & O_CREAT)) return -1;
+        if (vfs_create(path, VFS_FILE) != 0) return -1;
+        if (vfs_stat(path, &st) != 0) return -1;
+    } else if (flags & O_TRUNC) {
+        /* Truncate by recreating the file. Simplest semantics given
+           the ramfs interface we have. */
+        vfs_unlink(path);
+        if (vfs_create(path, VFS_FILE) != 0) return -1;
+        if (vfs_stat(path, &st) != 0) return -1;
+    }
+
+    for (int i = 3; i < FD_MAX; i++) {
+        if (fds[i].type == FD_NONE) {
+            fds[i].type   = FD_FILE;
+            strncpy(fds[i].path, path, VFS_MAX_PATH - 1);
+            fds[i].path[VFS_MAX_PATH - 1] = 0;
+            fds[i].offset = (flags & O_APPEND) ? st.size : 0;
+            fds[i].flags  = flags;
+            return i;
+        }
+    }
+    return -1;
+}
+
+int fd_close(int fd) {
+    fd_entry_t *fds = current_fds();
+    if (!fds || fd < 0 || fd >= FD_MAX) return -1;
+    if (fds[fd].type == FD_NONE) return -1;
+    /* Console fds 0..2 stay open across close(). Files drop to NONE. */
+    if (fds[fd].type == FD_CONSOLE) return 0;
+    fds[fd].type = FD_NONE;
+    fds[fd].path[0] = 0;
+    fds[fd].offset = 0;
+    fds[fd].flags  = 0;
+    return 0;
+}
+
+ssize_t fd_read(int fd, void *buf, size_t n) {
+    fd_entry_t *fds = current_fds();
+    if (!fds || fd < 0 || fd >= FD_MAX) return -1;
+    fd_entry_t *e = &fds[fd];
+    if (e->type == FD_CONSOLE) {
+        /* Blocking single-line read from the serial input ring. */
+        char *out = buf;
+        size_t i = 0;
+        while (i < n) {
+            char c = serial_getchar();
+            out[i++] = c;
+            if (c == '\n') break;
+        }
+        return (ssize_t)i;
+    }
+    if (e->type == FD_FILE) {
+        ssize_t r = vfs_read(e->path, buf, n, (off_t)e->offset);
+        if (r > 0) e->offset += (uint64_t)r;
+        return r;
+    }
+    return -1;
+}
+
+ssize_t fd_write(int fd, const void *buf, size_t n) {
+    fd_entry_t *fds = current_fds();
+    if (!fds || fd < 0 || fd >= FD_MAX) return -1;
+    fd_entry_t *e = &fds[fd];
+    if (e->type == FD_CONSOLE) {
+        const char *s = buf;
+        for (size_t i = 0; i < n; i++) {
+            if (s[i] == '\n') serial_putchar('\r');
+            serial_putchar(s[i]);
+        }
+        return (ssize_t)n;
+    }
+    if (e->type == FD_FILE) {
+        ssize_t r = vfs_write(e->path, buf, n, (off_t)e->offset);
+        if (r > 0) e->offset += (uint64_t)r;
+        return r;
+    }
+    return -1;
+}
+
+off_t fd_lseek(int fd, off_t off, int whence) {
+    fd_entry_t *fds = current_fds();
+    if (!fds || fd < 0 || fd >= FD_MAX) return (off_t)-1;
+    fd_entry_t *e = &fds[fd];
+    if (e->type != FD_FILE) return (off_t)-1;
+    uint64_t new_off = 0;
+    struct vfs_stat st;
+    switch (whence) {
+    case 0: new_off = (uint64_t)off; break;
+    case 1: new_off = e->offset + (uint64_t)off; break;
+    case 2:
+        if (vfs_stat(e->path, &st) != 0) return (off_t)-1;
+        new_off = (uint64_t)st.size + (uint64_t)off; break;
+    default: return (off_t)-1;
+    }
+    e->offset = new_off;
+    return (off_t)new_off;
 }
 
 void process_list_all(void) {
