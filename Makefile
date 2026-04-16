@@ -315,15 +315,16 @@ $(SYSROOT_LIB)/libulib.so.1: $(BUILD_USER)/ulib.pic.o
 # libtestdl.so.1: smallest-possible shared object — two trivial
 # function exports, no libulib dependency. Used by /bin/dlopentest to
 # exercise the ld-vibeos.so.1 dlopen/dlsym path.
-user/libtestdl/libtestdl.pic.o: user/libtestdl/libtestdl.c
+$(BUILD_USER)/libtestdl/libtestdl.pic.o: user/libtestdl/libtestdl.c
+	@mkdir -p $(dir $@)
 	$(CC) $(USER_CFLAGS_PIC) -c $< -o $@
 
-$(SYSROOT_LIB)/libtestdl.so.1: user/libtestdl/libtestdl.pic.o
+$(SYSROOT_LIB)/libtestdl.so.1: $(BUILD_USER)/libtestdl/libtestdl.pic.o
 	@mkdir -p $(dir $@)
 	$(CC) -nostdlib -ffreestanding \
 	      -Wl,-shared -Wl,-soname,libtestdl.so.1 \
 	      -Wl,-z,max-page-size=0x1000 \
-	      -o $@ user/libtestdl/libtestdl.pic.o -lgcc
+	      -o $@ $< -lgcc
 
 # libvibc.so.1: shared-object form of the subset libc. Declares a
 # run-time dependency on libulib.so.1 (for strlen/memcpy/sys_*).

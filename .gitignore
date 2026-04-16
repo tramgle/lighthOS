@@ -8,9 +8,6 @@ build/
 # Legacy paths from the pre-migration layout. Safe to remove once no
 # one's branches still have files here. Keep for now so stray object
 # files don't sneak into commits during the transition.
-user/*.o
-user/*.pic.o
-user/libc/*.o
-user/libc/*.pic.o
-user/ldso/*.o
+user/**/*.o
+user/**/*.pic.o
 disk.img
