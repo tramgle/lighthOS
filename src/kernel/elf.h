@@ -58,7 +58,7 @@ int elf_validate(const void *data, uint32_t size);
 
 /* Load an ELF into the supplied page directory with each PT_LOAD
    offset by `load_base`. For ET_EXEC callers pass 0 (original
-   behavior). For ET_DYN (e.g. the ld-vibeos.so.1 interpreter) pass
+   behavior). For ET_DYN (e.g. the ld-lighthos.so.1 interpreter) pass
    the chosen base address (e.g. 0x40000000). Returns the entry
    point (already offset by load_base), or 0 on failure. */
 uint32_t elf_load_at(const void *data, uint32_t size, uint32_t *pd,

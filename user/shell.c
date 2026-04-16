@@ -1091,9 +1091,9 @@ int main(int argc, char **argv) {
 
     for (;;) {
         sys_getcwd(cwd, VFS_MAX_PATH);
-        prompt_len = 8 /* "vibeos:" + "$" */ + 1 /* trailing space */
+        prompt_len = 10 /* "lighthos:" + "$" */ + 1 /* trailing space */
                    + (int)strlen(cwd);
-        printf("vibeos:%s$ ", cwd);
+        printf("lighthos:%s$ ", cwd);
 
         int len = readline(line, LINE_MAX);
         if (len == 0) continue;

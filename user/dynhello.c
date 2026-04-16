@@ -1,6 +1,6 @@
 /* dynhello — pilot dynamically-linked binary.
    References puts from libulib.so.1 (resolved at load time by
-   ld-vibeos.so.1). Verifies the full M3 dynamic-linking path
+   ld-lighthos.so.1). Verifies the full M3 dynamic-linking path
    end-to-end. */
 
 #include "syscall.h"

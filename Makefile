@@ -19,8 +19,8 @@ C_OBJECTS = $(patsubst src/%.c, build/%.o, $(C_SOURCES))
 S_OBJECTS = $(patsubst src/%.s, build/%.o, $(S_SOURCES))
 OBJECTS   = $(C_OBJECTS) $(S_OBJECTS)
 
-KERNEL_BIN = build/vibeos.bin
-ISO        = build/vibeos.iso
+KERNEL_BIN = build/lighthos.bin
+ISO        = build/lighthos.iso
 
 # All build artifacts live under build/ so `.gitignore` can stay a
 # single `build/` line and `make clean` is `rm -rf build`. Source
@@ -49,7 +49,7 @@ build/%.o: src/%.s
 
 $(ISO): $(KERNEL_BIN) grub.cfg user-programs etc/fstab
 	@mkdir -p build/iso/boot/grub build/iso/boot/etc
-	cp $(KERNEL_BIN) build/iso/boot/vibeos.bin
+	cp $(KERNEL_BIN) build/iso/boot/lighthos.bin
 	cp grub.cfg build/iso/boot/grub/grub.cfg
 	cp etc/fstab build/iso/boot/etc/fstab
 	@# Copy every built user binary into the ISO under /boot. Missing
@@ -66,7 +66,7 @@ $(ISO): $(KERNEL_BIN) grub.cfg user-programs etc/fstab
 	@# get staged as multiboot modules with /lib/ paths so the kernel
 	@# module loader drops them at /lib/<name>.
 	@mkdir -p build/iso/boot/lib
-	@for so in ld-vibeos.so.1 libulib.so.1 libvibc.so.1 libtestdl.so.1; do \
+	@for so in ld-lighthos.so.1 libulib.so.1 libvibc.so.1 libtestdl.so.1; do \
 		if [ -f $(SYSROOT_LIB)/$$so ]; then \
 			cp $(SYSROOT_LIB)/$$so build/iso/boot/lib/$$so; \
 		fi; \
@@ -87,7 +87,7 @@ $(DISK_IMG): user-programs
 	@mkdir -p $(dir $@)
 	@echo "Creating $(DISK_SIZE_MB) MB disk with FAT32 at LBA $(DISK_FAT_OFFSET)"
 	dd if=/dev/zero of=$@ bs=1M count=$(DISK_SIZE_MB) 2>/dev/null
-	mkfs.fat -F 32 -n VIBEOS --offset=$(DISK_FAT_OFFSET) $@ >/dev/null 2>&1
+	mkfs.fat -F 32 -n LIGHTHOS --offset=$(DISK_FAT_OFFSET) $@ >/dev/null 2>&1
 	mmd -i $@@@$$(($(DISK_FAT_OFFSET)*512)) ::BIN ::LIB 2>/dev/null || true
 	@for f in $(SIMPLE_USER_TARGETS) $(BUILD_USER)/libc_test $(BUILD_USER)/lua \
 	          $(BUILD_USER)/dynhello $(BUILD_USER)/dyn_echo; do \
@@ -96,7 +96,7 @@ $(DISK_IMG): user-programs
 	done
 	@# Dynamic-linking runtime: ld.so + shared libs.
 	mcopy -i $@@@$$(($(DISK_FAT_OFFSET)*512)) -D o \
-	      $(SYSROOT_LIB)/ld-vibeos.so.1 ::LIB/ld-vibeos.so.1
+	      $(SYSROOT_LIB)/ld-lighthos.so.1 ::LIB/ld-lighthos.so.1
 	mcopy -i $@@@$$(($(DISK_FAT_OFFSET)*512)) -D o \
 	      $(SYSROOT_LIB)/libulib.so.1 ::LIB/libulib.so.1
 	mcopy -i $@@@$$(($(DISK_FAT_OFFSET)*512)) -D o \
@@ -134,7 +134,7 @@ debug: iso-ready
 
 # run-gdb: boot the ISO with the kernel's gdb stub exposed on COM2
 # as tcp::1234. Connect from another shell with:
-#   i686-elf-gdb build/vibeos.bin -ex 'target remote localhost:1234'
+#   i686-elf-gdb build/lighthos.bin -ex 'target remote localhost:1234'
 # The kernel drops into the stub on any int3 (kernel or user).
 # Insert breakpoints by adding `gdb_break();` in kernel source or via
 # gdb's `break *0xADDR` (software int3 patched at runtime).
@@ -169,7 +169,7 @@ USER_LDFLAGS = -T user/user.ld -nostdlib -ffreestanding -lgcc
 # Stage headers into the sysroot. Copies are cheap and keep the
 # source-of-truth in user/ and user/libc/include/. -MD would let us
 # track transitive header deps but we're not there yet.
-SYSROOT_HDRS_TOP  = ulib.h syscall.h luaconf_vibeos.h
+SYSROOT_HDRS_TOP  = ulib.h syscall.h luaconf_lighthos.h
 SYSROOT_HDRS_LIBC = $(notdir $(wildcard user/libc/include/*.h))
 SYSROOT_HDRS = $(addprefix $(SYSROOT_INC)/, $(SYSROOT_HDRS_TOP) $(SYSROOT_HDRS_LIBC))
 
@@ -205,7 +205,7 @@ LUA_CORE = lapi lcode lctype ldebug ldo ldump lfunc lgc llex lmem lobject \
 LUA_LIB  = lauxlib lbaselib lmathlib lstrlib ltablib liolib loslib lcorolib lutf8lib
 LUA_OBJS = $(addprefix build/lua/, $(addsuffix .o, $(LUA_CORE) $(LUA_LIB)))
 
-LUA_CFLAGS = $(USER_CFLAGS) -I$(LUA_SRC_DIR) -include $(SYSROOT_INC)/luaconf_vibeos.h \
+LUA_CFLAGS = $(USER_CFLAGS) -I$(LUA_SRC_DIR) -include $(SYSROOT_INC)/luaconf_lighthos.h \
              -Wno-unused-parameter -Wno-unused-function -Wno-sign-compare \
              -Wno-implicit-fallthrough -Wno-parentheses -Wno-empty-body \
              -Wno-maybe-uninitialized -Wno-unused-but-set-variable
@@ -220,7 +220,7 @@ LUA_CFLAGS = $(USER_CFLAGS) -I$(LUA_SRC_DIR) -include $(SYSROOT_INC)/luaconf_vib
 #                  harness before dynamic libs may be installed;
 #                  `hello` is the universal smoke test.
 #   DYNAMIC_USER — everything else. Linked with PT_INTERP=/lib/
-#                  ld-vibeos.so.1 and DT_NEEDED libulib.so.1 (and
+#                  ld-lighthos.so.1 and DT_NEEDED libulib.so.1 (and
 #                  libvibc.so.1 where applicable).
 #
 # The full list is declared here (before user-programs uses it)
@@ -238,7 +238,7 @@ DYNAMIC_USER_TARGETS = $(addprefix $(BUILD_USER)/,$(DYNAMIC_USER))
 user-programs: $(SIMPLE_USER_TARGETS) \
                $(BUILD_USER)/libc_test $(BUILD_USER)/lua \
                $(BUILD_USER)/dynhello $(BUILD_USER)/dyn_echo \
-               $(SYSROOT_LIB)/ld-vibeos.so.1 \
+               $(SYSROOT_LIB)/ld-lighthos.so.1 \
                $(SYSROOT_LIB)/libulib.so.1 \
                $(SYSROOT_LIB)/libvibc.so.1 \
                $(SYSROOT_LIB)/libtestdl.so.1
@@ -314,7 +314,7 @@ $(SYSROOT_LIB)/libulib.so.1: $(BUILD_USER)/ulib.pic.o
 
 # libtestdl.so.1: smallest-possible shared object — two trivial
 # function exports, no libulib dependency. Used by /bin/dlopentest to
-# exercise the ld-vibeos.so.1 dlopen/dlsym path.
+# exercise the ld-lighthos.so.1 dlopen/dlsym path.
 $(BUILD_USER)/libtestdl/libtestdl.pic.o: user/libtestdl/libtestdl.c
 	@mkdir -p $(dir $@)
 	$(CC) $(USER_CFLAGS_PIC) -c $< -o $@
@@ -340,11 +340,11 @@ $(SYSROOT_LIB)/libvibc.so.1: $(USER_LIBC_PIC_OBJS) $(SYSROOT_LIB)/libulib.so.1
 	      -L$(SYSROOT_LIB) -lulib -lgcc
 	@ln -sf libvibc.so.1 $(SYSROOT_LIB)/libvibc.so
 
-# ---- ld-vibeos.so.1: the user-space dynamic linker ---------------
+# ---- ld-lighthos.so.1: the user-space dynamic linker ---------------
 # Built as a plain ET_EXEC placed at 0x40000000 (see user/ldso/ldso.ld),
 # statically linked against libulib.a so the interpreter has its own
 # strcmp/puts/printf without any bootstrap problem. The kernel loads
-# this alongside any main exec that declares PT_INTERP=/lib/ld-vibeos.so.1.
+# this alongside any main exec that declares PT_INTERP=/lib/ld-lighthos.so.1.
 $(BUILD_USER_LDSO)/crt0_ldso.o: user/ldso/crt0_ldso.s
 	@mkdir -p $(dir $@)
 	$(AS) $(ASFLAGS) $< -o $@
@@ -353,7 +353,7 @@ $(BUILD_USER_LDSO)/ld_main.o: user/ldso/ld_main.c $(SYSROOT_HDRS)
 	@mkdir -p $(dir $@)
 	$(CC) $(USER_CFLAGS) -c $< -o $@
 
-$(SYSROOT_LIB)/ld-vibeos.so.1: $(BUILD_USER_LDSO)/crt0_ldso.o \
+$(SYSROOT_LIB)/ld-lighthos.so.1: $(BUILD_USER_LDSO)/crt0_ldso.o \
                                $(BUILD_USER_LDSO)/ld_main.o \
                                user/ldso/ldso.ld $(SYSROOT_LIB)/libulib.a
 	@mkdir -p $(dir $@)
@@ -371,33 +371,33 @@ $(STATIC_USER_TARGETS): $(BUILD_USER)/%: $(BUILD_USER)/crt0.o $(BUILD_USER)/%.o 
 	$(CC) $(USER_LDFLAGS) -o $@ $(BUILD_USER)/crt0.o $(BUILD_USER)/$*.o \
 	      -Wl,-Bstatic -L$(SYSROOT_LIB) -lulib -Wl,-Bdynamic
 
-# Dynamic binaries: main exec at 0x08048000, PT_INTERP=/lib/ld-vibeos.so.1,
+# Dynamic binaries: main exec at 0x08048000, PT_INTERP=/lib/ld-lighthos.so.1,
 # DT_NEEDED libulib.so.1. Symbols resolved at load time by the
 # runtime linker.
 $(DYNAMIC_USER_TARGETS): $(BUILD_USER)/%: $(BUILD_USER)/crt0.o $(BUILD_USER)/%.o $(SYSROOT_LIB)/libulib.so.1
 	@mkdir -p $(dir $@)
 	$(CC) -T user/user.ld -nostdlib -ffreestanding \
-	      -Wl,--dynamic-linker=/lib/ld-vibeos.so.1 \
+	      -Wl,--dynamic-linker=/lib/ld-lighthos.so.1 \
 	      -Wl,--no-as-needed \
 	      -Wl,-rpath-link,$(SYSROOT_LIB) \
 	      -o $@ $(BUILD_USER)/crt0.o $(BUILD_USER)/$*.o \
 	      -L$(SYSROOT_LIB) -lulib -lgcc
 
 # Binaries that need libvibc (libc_test + lua) — now dynamic too.
-# Resolving symbols through ld-vibeos.so.1 at load time means lua's
+# Resolving symbols through ld-lighthos.so.1 at load time means lua's
 # 226 KB of libvibc + libulib duplication goes away in favor of
 # a shared copy in /lib/.
 $(BUILD_USER)/libc_test: $(BUILD_USER)/crt0.o $(BUILD_USER)/libc_test.o \
                          $(SYSROOT_LIB)/libvibc.so.1 $(SYSROOT_LIB)/libulib.so.1
 	@mkdir -p $(dir $@)
 	$(CC) -T user/user.ld -nostdlib -ffreestanding \
-	      -Wl,--dynamic-linker=/lib/ld-vibeos.so.1 \
+	      -Wl,--dynamic-linker=/lib/ld-lighthos.so.1 \
 	      -Wl,--no-as-needed \
 	      -Wl,-rpath-link,$(SYSROOT_LIB) \
 	      -o $@ $(BUILD_USER)/crt0.o $(BUILD_USER)/libc_test.o \
 	      -L$(SYSROOT_LIB) -lvibc -lulib -lgcc
 
-build/lua/linit_vibeos.o: user/linit_vibeos.c $(SYSROOT_HDRS)
+build/lua/linit_lighthos.o: user/linit_lighthos.c $(SYSROOT_HDRS)
 	@mkdir -p $(dir $@)
 	$(CC) $(LUA_CFLAGS) -c $< -o $@
 
@@ -406,19 +406,19 @@ build/lua/lua_main.o: user/lua_main.c $(SYSROOT_HDRS)
 	$(CC) $(LUA_CFLAGS) -c $< -o $@
 
 $(BUILD_USER)/lua: $(BUILD_USER)/crt0.o $(LUA_OBJS) \
-                   build/lua/linit_vibeos.o build/lua/lua_main.o \
+                   build/lua/linit_lighthos.o build/lua/lua_main.o \
                    $(SYSROOT_LIB)/libvibc.so.1 $(SYSROOT_LIB)/libulib.so.1
 	@mkdir -p $(dir $@)
 	$(CC) -T user/user.ld -nostdlib -ffreestanding \
-	      -Wl,--dynamic-linker=/lib/ld-vibeos.so.1 \
+	      -Wl,--dynamic-linker=/lib/ld-lighthos.so.1 \
 	      -Wl,--no-as-needed \
 	      -Wl,-rpath-link,$(SYSROOT_LIB) \
 	      -o $@ $(BUILD_USER)/crt0.o $(LUA_OBJS) \
-	      build/lua/linit_vibeos.o build/lua/lua_main.o \
+	      build/lua/linit_lighthos.o build/lua/lua_main.o \
 	      -L$(SYSROOT_LIB) -lvibc -lulib -lgcc
 
 # Dynamic binaries: link against libulib.so.1, record PT_INTERP, and
-# let ld-vibeos.so.1 resolve symbols at load time. Keeps the same
+# let ld-lighthos.so.1 resolve symbols at load time. Keeps the same
 # 0x08048000 text base as static binaries (non-PIE main exec), so
 # user.ld still applies. `-Wl,--no-as-needed` forces libulib.so.1
 # to stay in DT_NEEDED even if no direct symbol reference is visible
@@ -427,7 +427,7 @@ $(BUILD_USER)/dynhello: $(BUILD_USER)/crt0.o $(BUILD_USER)/dynhello.o \
                         $(SYSROOT_LIB)/libulib.so.1
 	@mkdir -p $(dir $@)
 	$(CC) -T user/user.ld -nostdlib -ffreestanding \
-	      -Wl,--dynamic-linker=/lib/ld-vibeos.so.1 \
+	      -Wl,--dynamic-linker=/lib/ld-lighthos.so.1 \
 	      -Wl,--no-as-needed \
 	      -Wl,-rpath-link,$(SYSROOT_LIB) \
 	      -o $@ $(BUILD_USER)/crt0.o $(BUILD_USER)/dynhello.o \
@@ -438,7 +438,7 @@ $(BUILD_USER)/dyn_echo: $(BUILD_USER)/crt0.o $(BUILD_USER)/dyn_echo.o \
                         $(SYSROOT_LIB)/libulib.so.1
 	@mkdir -p $(dir $@)
 	$(CC) -T user/user.ld -nostdlib -ffreestanding \
-	      -Wl,--dynamic-linker=/lib/ld-vibeos.so.1 \
+	      -Wl,--dynamic-linker=/lib/ld-lighthos.so.1 \
 	      -Wl,--no-as-needed \
 	      -Wl,-rpath-link,$(SYSROOT_LIB) \
 	      -o $@ $(BUILD_USER)/crt0.o $(BUILD_USER)/dyn_echo.o \
@@ -462,8 +462,8 @@ test: clean
 	@# `make docker-build` will produce a fresh runnable kernel.
 	rm -rf build
 
-DOCKER_RUN      = docker run --rm -u $$(id -u):$$(id -g) -v "$$(pwd)":/src vibeos-toolchain
-DOCKER_RUN_ROOT = docker run --rm -v "$$(pwd)":/src vibeos-toolchain
+DOCKER_RUN      = docker run --rm -u $$(id -u):$$(id -g) -v "$$(pwd)":/src lighthos-toolchain
+DOCKER_RUN_ROOT = docker run --rm -v "$$(pwd)":/src lighthos-toolchain
 
 docker-build:
 	$(DOCKER_RUN) make all
@@ -476,7 +476,7 @@ docker-lua-compile:
 # Layout of bootdisk.img:
 #   LBA 0        : mbr.bin        (512 bytes)
 #   LBA 1..62    : stage2.bin     (up to 31 KB, zero-padded)
-#   LBA 63..2047 : kernel ELF     (raw bytes of build/vibeos.bin)
+#   LBA 63..2047 : kernel ELF     (raw bytes of build/lighthos.bin)
 #   LBA 2048..   : simplefs partition (copied verbatim from disk.img)
 #
 # Producing bootdisk.img requires a pre-populated disk.img — boot once with
@@ -512,7 +512,7 @@ docker-bootdisk:
 	$(DOCKER_RUN) make bootdisk
 
 # Boot the disk image directly (no CDROM, no multiboot modules). If it
-# works, VibeOS is self-hosting for the install + boot flow.
+# works, LighthOS is self-hosting for the install + boot flow.
 run-bootdisk: docker-bootdisk
 	qemu-system-i386 -drive file=build/bootdisk.img,format=raw,if=ide \
 		-nographic -m 128M
@@ -528,7 +528,7 @@ docker-test:
 	$(DOCKER_RUN) make test
 
 # ---- In-system test harness -----------------------------------------
-# test-iso builds build/vibeos-test.iso: production user binaries
+# test-iso builds build/lighthos-test.iso: production user binaries
 # PLUS each tests/*.vsh as a multiboot module whose cmdline contains
 # "tests/<name>.vsh". Kernel's module loader drops those into
 # /tests/<name>.vsh in ramfs (see src/kernel/main.c), so the
@@ -536,14 +536,14 @@ docker-test:
 
 TEST_VSH = $(wildcard tests/*.vsh)
 
-build/vibeos-test.iso: $(ISO) grub-test.cfg $(TEST_VSH)
+build/lighthos-test.iso: $(ISO) grub-test.cfg $(TEST_VSH)
 	@mkdir -p build/iso-test/boot/grub build/iso-test/boot/tests
 	@cp -r build/iso/boot/. build/iso-test/boot/
 	@cp grub-test.cfg build/iso-test/boot/grub/grub.cfg
 	@for f in $(TEST_VSH); do cp $$f build/iso-test/boot/tests/; done
 	grub-mkrescue -o $@ build/iso-test 2>/dev/null
 
-test-iso: build/vibeos-test.iso
+test-iso: build/lighthos-test.iso
 
 docker-test-iso:
 	$(DOCKER_RUN) make test-iso
@@ -551,11 +551,11 @@ docker-test-iso:
 # test-disk boots the test ISO, sends a single "runtests /tests;
 # shutdown" line so there's no in-band stdin timing dependency, and
 # checks the captured serial log for FAIL markers. Run
-# `make docker-test-iso` first to build build/vibeos-test.iso in docker
+# `make docker-test-iso` first to build build/lighthos-test.iso in docker
 # (host typically doesn't have grub-mkrescue).
 test-disk:
-	@if [ ! -f build/vibeos-test.iso ]; then \
-	  echo "Missing build/vibeos-test.iso — run 'make docker-test-iso' first."; \
+	@if [ ! -f build/lighthos-test.iso ]; then \
+	  echo "Missing build/lighthos-test.iso — run 'make docker-test-iso' first."; \
 	  exit 1; \
 	fi
 	@if [ ! -f $(DISK_IMG) ]; then \
@@ -568,7 +568,7 @@ test-disk:
 	@# then ACPI-shuts-down on exit. No stdin dance, no sleep-45
 	@# timing assumption. Redirect stdin from /dev/null so nothing
 	@# can keep qemu alive.
-	@timeout 90 qemu-system-i386 -cdrom build/vibeos-test.iso \
+	@timeout 90 qemu-system-i386 -cdrom build/lighthos-test.iso \
 	      -drive file=$(DISK_IMG),format=raw,if=ide \
 	      -nographic -m 128M </dev/null \
 	  | tee build/test-output.log >/dev/null

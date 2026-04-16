@@ -1,7 +1,10 @@
-# VibeOS — agent launch point
+# LighthOS — agent launch point
 
 Quick orientation doc for future sessions. Read this first; pair
-with `.claude/projects/-home-stolley-projects-vibeos/memory/project_vibeos.md`
+with the long-form memory snapshot in Claude Code's auto-memory
+(path derived from the repo's absolute location — if still at
+`~/projects/vibeos`, it's
+`.claude/projects/-home-stolley-projects-vibeos/memory/project_vibeos.md`)
 for the long-form history.
 
 ## What this is
@@ -16,7 +19,7 @@ separate ELFs loaded by the kernel. As of HEAD we have:
 - User: ~30 dynamic + 4 static binaries, a shell with job control,
   lua 5.4 as a shared-lib binary, vi clone.
 - Dynamic linking: kernel PT_INTERP handling, user-space
-  `ld-vibeos.so.1`, `libulib.so.1`, `libvibc.so.1`, `libtestdl.so.1`.
+  `ld-lighthos.so.1`, `libulib.so.1`, `libvibc.so.1`, `libtestdl.so.1`.
   dlopen/dlsym via a fixed-address function table at 0x50000000.
 - Environment variables end-to-end via SysV auxv + ulib getenv/setenv.
 - Tier-3 test harness: kernel reads `autorun=<path>` from multiboot
@@ -48,8 +51,8 @@ build/            ALL build artifacts (gitignored)
   build/sysroot/usr/lib/      .a / .so artifacts
   build/disk.img              FAT32 disk image
   build/bootdisk.img          self-bootable disk (disk.img + MBR + kernel)
-  build/vibeos.iso            normal ISO
-  build/vibeos-test.iso       test ISO with autorun=/tests
+  build/lighthos.iso            normal ISO
+  build/lighthos-test.iso       test ISO with autorun=/tests
 ```
 
 ## Build + test
@@ -137,7 +140,7 @@ map.** Switching that requires the L5 port.
 
 ## Dynamic-linking status quick ref
 
-- Non-PIE main exec at 0x08048000. ld-vibeos.so.1 at 0x40000000.
+- Non-PIE main exec at 0x08048000. ld-lighthos.so.1 at 0x40000000.
   Shared libs at first-fit from 0x30000000.
 - Relocation types handled: R_386_RELATIVE, R_386_GLOB_DAT,
   R_386_JMP_SLOT, R_386_32, R_386_PC32, R_386_COPY.
@@ -177,14 +180,15 @@ to a working shell:
   `/lib/` staged inside can't run dynamic binaries).
 
 Anything else is in the dynamic set. Lua, libc_test, vi, shell,
-etc. all go through ld-vibeos.so.1 today.
+etc. all go through ld-lighthos.so.1 today.
 
 ## First actions for a new agent
 
 1. `make docker-test-disk` — 6-second sanity check that the tree
    builds and all 40 assertions pass.
 2. Read this file + the memory snapshot at
-   `~/.claude/projects/-home-stolley-projects-vibeos/memory/project_vibeos.md`.
+   `~/.claude/projects/-home-stolley-projects-vibeos/memory/project_vibeos.md`
+   (path reflects the repo's current directory, not the project name).
 3. Check `git log --oneline` for recent work.
 4. If starting a new feature, follow the existing pattern:
    kernel support + user wrapper + test binary + `tests/*.vsh` +

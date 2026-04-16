@@ -1,4 +1,4 @@
-; VibeOS second-stage bootloader.
+; LighthOS second-stage bootloader.
 ;
 ; Entry: real mode, DL = BIOS drive, loaded at 0x8000 by the MBR.
 ; Tasks:
@@ -160,7 +160,7 @@ load_kernel:
 
 ; ---- strings ---------------------------------------------------------
 
-msg_stage2:    db "vibeos stage2", 13, 10, 0
+msg_stage2:    db "lighthos stage2", 13, 10, 0
 msg_going_pm:  db "-> pm", 13, 10, 0
 msg_disk_err:  db "kernel read fail", 13, 10, 0
 

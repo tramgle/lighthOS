@@ -728,7 +728,7 @@ static void spawn_trampoline(void) {
 }
 
 /* Load the dynamic linker named in PT_INTERP alongside the main ELF.
-   Our ld-vibeos.so.1 is a plain ET_EXEC statically linked to run at
+   Our ld-lighthos.so.1 is a plain ET_EXEC statically linked to run at
    0x40000000, so we pass load_base=0 (p_vaddr already holds the
    runtime address). This sidesteps the self-relocation bootstrap
    problem that a PIC interpreter would need. Shared libraries are

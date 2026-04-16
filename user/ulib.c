@@ -284,7 +284,7 @@ int unsetenv(const char *name) {
 }
 
 /* ---- dlopen / dlsym wrappers ----
-   Thin forwarders into ld-vibeos.so.1's function table, published
+   Thin forwarders into ld-lighthos.so.1's function table, published
    at DL_IFACE_ADDR by the interpreter on startup. Layout must stay
    in sync with user/ldso/ld_main.c — if either changes, both move. */
 

@@ -47,7 +47,7 @@ int   unsetenv(const char *name);
    a named symbol, with handle=NULL meaning "search everything
    already loaded" (global). dlclose is a no-op stub for now — we
    don't track reference counts, so objects stay resident until
-   process exit. Backed by a function table that ld-vibeos.so.1
+   process exit. Backed by a function table that ld-lighthos.so.1
    publishes at DL_IFACE_ADDR during startup. */
 #define RTLD_LAZY    0x1   /* Accepted but ignored — we always resolve eagerly. */
 #define RTLD_NOW     0x2

@@ -226,9 +226,9 @@ void shell_run(void) {
 
     for (;;) {
         /* Print prompt with cwd */
-        kprintf("vibeos:%s$ ", cwd);
+        kprintf("lighthos:%s$ ", cwd);
 
-        int len = shell_readline(line, LINE_MAX, "vibeos:$ ");
+        int len = shell_readline(line, LINE_MAX, "lighthos:$ ");
         if (len == 0) continue;
 
         hist_add(line);

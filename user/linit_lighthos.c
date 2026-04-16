@@ -1,4 +1,4 @@
-/* Scaled-down luaL_openlibs for VibeOS. Opens only the libraries we
+/* Scaled-down luaL_openlibs for LighthOS. Opens only the libraries we
    support: base, package-less, no debug/coroutine/os/utf8. */
 
 #include "lprefix.h"

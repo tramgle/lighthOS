@@ -1,4 +1,4 @@
-/* FAT16/32 driver for VibeOS.
+/* FAT16/32 driver for LighthOS.
  *
  * Read + write support with 8.3 short names. Auto-detects FAT16 vs
  * FAT32 from the BPB at mount time. FAT32 uses 32-bit cluster entries

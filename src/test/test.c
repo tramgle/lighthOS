@@ -3,7 +3,7 @@
 
 void test_run_all(void) {
     serial_printf("\n[TEST] ========================================\n");
-    serial_printf("[TEST] VibeOS Test Suite\n");
+    serial_printf("[TEST] LighthOS Test Suite\n");
     serial_printf("[TEST] ========================================\n\n");
 
     int total = 0, passed = 0, failed = 0;

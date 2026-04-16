@@ -1,4 +1,4 @@
-; VibeOS MBR — stage 1 bootloader.
+; LighthOS MBR — stage 1 bootloader.
 ;
 ; Runs in 16-bit real mode at physical 0x7C00. DL = BIOS drive number.
 ; Loads STAGE2_SECTS sectors starting at LBA 1 into linear 0x8000, then
@@ -69,7 +69,7 @@ print:
 .done:
     ret
 
-msg_loading: db "vibeos mbr: loading stage2", 13, 10, 0
+msg_loading: db "lighthos mbr: loading stage2", 13, 10, 0
 msg_jump:    db "ok", 13, 10, 0
 msg_err:     db "disk read fail", 13, 10, 0
 

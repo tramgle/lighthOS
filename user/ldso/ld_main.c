@@ -1,4 +1,4 @@
-/* ld-vibeos.so.1 — user-space dynamic linker.
+/* ld-lighthos.so.1 — user-space dynamic linker.
  *
  * Loaded by the kernel at 0x40000000 alongside the main executable.
  * Given a SysV-style stack (argc, argv, envp, auxv), we:

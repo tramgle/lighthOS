@@ -43,7 +43,7 @@ void kernel_main(uint32_t magic, multiboot_info_t *mbi) {
        heap_init. */
     boot_log_enable();
 
-    kprintf("VibeOS booting...\n\n");
+    kprintf("LighthOS booting...\n\n");
 
     if (magic != MULTIBOOT_MAGIC) {
         panic("Invalid multiboot magic number");
@@ -232,7 +232,7 @@ void kernel_main(uint32_t magic, multiboot_info_t *mbi) {
     test_run_all();
     for (;;) __asm__ volatile ("hlt");
 #else
-    kprintf("Welcome to VibeOS!\n");
+    kprintf("Welcome to LighthOS!\n");
     kprintf("Free memory: %u KB\n", (pmm_get_free_count() * PAGE_SIZE) / 1024);
 
     task_enable_scheduling();

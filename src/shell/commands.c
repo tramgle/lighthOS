@@ -387,7 +387,7 @@ static void cmd_exec(int argc, char **argv) {
     char path[VFS_MAX_PATH];
     shell_resolve_path(argv[1], path, VFS_MAX_PATH);
 
-    int pid = process_spawn(path, 0);
+    int pid = process_spawn(path, 0, 0);
     if (pid < 0) {
         kprintf("exec: failed to run %s\n", argv[1]);
         return;

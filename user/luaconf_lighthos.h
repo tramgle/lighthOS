@@ -1,10 +1,10 @@
-/* VibeOS overlay for Lua's luaconf.h. Gets pulled in via -include so
+/* LighthOS overlay for Lua's luaconf.h. Gets pulled in via -include so
    it lands before the stock luaconf.h. Disables POSIX/Linux assumptions,
    picks C89-sized numbers so we avoid depending on runtime features our
    libc subset doesn't implement. */
 
-#ifndef LUACONF_VIBEOS_H
-#define LUACONF_VIBEOS_H
+#ifndef LUACONF_LIGHTHOS_H
+#define LUACONF_LIGHTHOS_H
 
 /* Force the C89 number path: long + double. Integer literals stay 32-bit
    (our long is int32), and double uses the x87 FPU which is still

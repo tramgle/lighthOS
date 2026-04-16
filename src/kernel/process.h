@@ -94,7 +94,7 @@ typedef struct process {
        PT_INTERP. Zero in all fields means "static binary — no interp".
        Populated in process_spawn/execve *before* the trampoline runs;
        consumed by setup_user_stack to emit the SysV aux vector so the
-       interpreter (ld-vibeos.so.1) can find main's phdrs + entry. */
+       interpreter (ld-lighthos.so.1) can find main's phdrs + entry. */
     uint32_t     main_phdr_vaddr;   /* AT_PHDR */
     uint32_t     main_phnum;        /* AT_PHNUM */
     uint32_t     main_entry;        /* AT_ENTRY */

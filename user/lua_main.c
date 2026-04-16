@@ -1,4 +1,4 @@
-/* Scaled-down Lua standalone interpreter for VibeOS.
+/* Scaled-down Lua standalone interpreter for LighthOS.
  * Supports:
  *   lua                  — interactive REPL
  *   lua <script.lua>     — run a file
@@ -157,7 +157,7 @@ static void print_results(lua_State *L) {
 }
 
 static void repl(lua_State *L) {
-    fputs("VibeOS Lua " LUA_VERSION_MAJOR "." LUA_VERSION_MINOR
+    fputs("LighthOS Lua " LUA_VERSION_MAJOR "." LUA_VERSION_MINOR
           " — :q to quit\n", stdout);
     fflush(stdout);
     for (;;) {

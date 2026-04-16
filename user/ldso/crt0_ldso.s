@@ -1,4 +1,4 @@
-; ld-vibeos.so.1 entry point.
+; ld-lighthos.so.1 entry point.
 ;
 ; The kernel hands us a SysV-style stack:
 ;   [esp+0]        argc

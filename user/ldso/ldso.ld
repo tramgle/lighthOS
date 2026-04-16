@@ -1,4 +1,4 @@
-/* ld-vibeos.so.1 linker script.
+/* ld-lighthos.so.1 linker script.
    Places the interpreter at a high fixed address (0x40000000) far
    from the main executable's text (0x08048000..) and heap
    (0x08100000..). Statically linked, ET_EXEC — not PIC. Runs in the

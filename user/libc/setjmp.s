@@ -14,7 +14,7 @@
 bits 32
 
 ; `:function` makes nasm tag these as STT_FUNC in the ELF symbol
-; table. Without it the defaults to NOTYPE, and ld-vibeos.so.1 skips
+; table. Without it the defaults to NOTYPE, and ld-lighthos.so.1 skips
 ; NOTYPE symbols during interposition — see lookup_in in
 ; user/ldso/ld_main.c.
 global setjmp:function
