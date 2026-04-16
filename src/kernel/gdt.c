@@ -1,46 +1,69 @@
-#include "kernel/gdt.h"
+/* x86_64 GDT.
+ *
+ * In long mode the CPU ignores most of the segment base/limit for
+ * code/data descriptors — only the access and flag bits matter
+ * (L=1 required on the 64-bit code segment). The TSS descriptor
+ * is 16 bytes to hold a 64-bit base.
+ *
+ * Layout:
+ *   0x00  null
+ *   0x08  kernel code  (L=1, DPL=0)  0x00AF9A000000FFFF
+ *   0x10  kernel data  (DPL=0)       0x00CF92000000FFFF
+ *   0x18  user code    (L=1, DPL=3)  0x00AFFA000000FFFF
+ *   0x20  user data    (DPL=3)       0x00CFF2000000FFFF
+ *   0x28  TSS low half                (filled by gdt_install_tss)
+ *   0x30  TSS high half
+ *
+ * The SYSCALL/SYSRET MSR layout (installed in L5) requires a
+ * specific ordering: STAR[47:32] = kernel CS (with kernel SS at
+ * CS+8), STAR[63:48] = (user 32-bit CS-8, i.e. data-8). We match
+ * that ordering.
+ */
 
-struct gdt_entry {
-    uint16_t limit_low;
-    uint16_t base_low;
-    uint8_t  base_mid;
-    uint8_t  access;
-    uint8_t  granularity;
-    uint8_t  base_high;
-} __attribute__((packed));
+#include "kernel/gdt.h"
+#include "kernel/tss.h"
+#include "lib/string.h"
+#include "lib/kprintf.h"
+
+static uint64_t gdt[7] __attribute__((aligned(8)));
 
 struct gdt_ptr {
     uint16_t limit;
-    uint32_t base;
+    uint64_t base;
 } __attribute__((packed));
 
-#define GDT_ENTRIES 6
-
-static struct gdt_entry gdt[GDT_ENTRIES];
-static struct gdt_ptr   gdtp;
+static struct gdt_ptr gdtp;
 
 extern void gdt_flush(struct gdt_ptr *ptr);
 
-void gdt_set_entry(int idx, uint32_t base, uint32_t limit,
-                   uint8_t access, uint8_t gran) {
-    gdt[idx].base_low    = base & 0xFFFF;
-    gdt[idx].base_mid    = (base >> 16) & 0xFF;
-    gdt[idx].base_high   = (base >> 24) & 0xFF;
-    gdt[idx].limit_low   = limit & 0xFFFF;
-    gdt[idx].granularity = ((limit >> 16) & 0x0F) | (gran & 0xF0);
-    gdt[idx].access      = access;
-}
-
 void gdt_init(void) {
-    gdtp.limit = sizeof(gdt) - 1;
-    gdtp.base  = (uint32_t)&gdt;
+    memset(gdt, 0, sizeof(gdt));
+    gdt[0] = 0x0000000000000000ULL;
+    gdt[1] = 0x00AF9A000000FFFFULL;         /* kernel code  */
+    gdt[2] = 0x00CF92000000FFFFULL;         /* kernel data  */
+    gdt[3] = 0x00AFFA000000FFFFULL;         /* user code    */
+    gdt[4] = 0x00CFF2000000FFFFULL;         /* user data    */
+    /* gdt[5..6] = TSS — filled by gdt_install_tss from tss_init. */
 
-    gdt_set_entry(0, 0, 0,       0x00, 0x00);  /* Null */
-    gdt_set_entry(1, 0, 0xFFFFF, 0x9A, 0xCF);  /* Kernel code (0x08) */
-    gdt_set_entry(2, 0, 0xFFFFF, 0x92, 0xCF);  /* Kernel data (0x10) */
-    gdt_set_entry(3, 0, 0xFFFFF, 0xFA, 0xCF);  /* User code   (0x18, RPL3=0x1B) */
-    gdt_set_entry(4, 0, 0xFFFFF, 0xF2, 0xCF);  /* User data   (0x20, RPL3=0x23) */
-    /* Entry 5 (0x28) reserved for TSS — set up by tss_init() */
+    gdtp.limit = sizeof(gdt) - 1;
+    gdtp.base  = (uint64_t)(uintptr_t)&gdt[0];
 
     gdt_flush(&gdtp);
+    serial_printf("[gdt] loaded @0x%lx (%u bytes)\n",
+                  (uint64_t)(uintptr_t)&gdt[0], (uint32_t)sizeof(gdt));
+}
+
+void gdt_install_tss(uint64_t base, uint32_t limit) {
+    uint64_t low = 0;
+    low |= (uint64_t)(limit & 0xFFFF);
+    low |= ((uint64_t)(limit >> 16) & 0xF) << 48;
+    low |= (base & 0xFFFFFFULL) << 16;
+    low |= ((base >> 24) & 0xFFULL) << 56;
+    low |= (uint64_t)0x89 << 40;             /* P=1 DPL=0 type=9 (TSS avail) */
+    /* flags nibble = 0 (byte granularity — TSS limit is in bytes) */
+
+    uint64_t high = (base >> 32) & 0xFFFFFFFFULL;
+
+    gdt[5] = low;
+    gdt[6] = high;
 }

@@ -39,11 +39,21 @@ ifeq ($(PORT_MINIMAL),1)
   # back to 0 and delete src/port/shim.c.
   C_SOURCES := \
     src/kernel/main.c \
+    src/kernel/gdt.c \
+    src/kernel/tss.c \
+    src/kernel/idt.c \
+    src/kernel/isr.c \
+    src/kernel/pic.c \
     src/mm/pmm.c \
     src/mm/vmm.c \
     src/lib/string.c \
     src/port/shim.c
-  S_SOURCES := src/boot/boot.s
+  S_SOURCES := \
+    src/boot/boot.s \
+    src/kernel/gdt_flush.s \
+    src/kernel/tss_flush.s \
+    src/kernel/idt_flush.s \
+    src/kernel/isr_stub.s
 endif
 
 C_OBJECTS = $(patsubst src/%.c, build/%.o, $(C_SOURCES))

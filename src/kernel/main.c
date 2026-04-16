@@ -1,12 +1,11 @@
 /*
- * L2 kernel_main — exercises the ported pmm + vmm.
+ * L3 kernel_main — wires GDT + TSS + IDT + PIC and round-trips
+ * an interrupt (both a software INT 0x80 and the timer IRQ0).
  *
- * Initialises pmm from the multiboot memory map, swaps the boot
- * trampoline page tables for a freshly-built kernel PML4 with a
- * 1 GiB identity map + higher-half kernel map, then runs a quick
- * self-test: allocate a frame, map it into user-space virtual
- * range, write a sentinel, read it back, unmap, confirm the
- * mapping is gone. Prints results on COM1 and halts.
+ * Still a port-era kernel: no processes, no syscall dispatcher,
+ * no userland. The self-test installs a one-shot handler, raises
+ * INT 0x80, confirms the handler ran, then enables IRQs and waits
+ * for the timer to prove IRQ path works too.
  */
 
 #include "include/types.h"
@@ -15,61 +14,78 @@
 #include "lib/string.h"
 #include "mm/pmm.h"
 #include "mm/vmm.h"
+#include "kernel/gdt.h"
+#include "kernel/tss.h"
+#include "kernel/idt.h"
+#include "kernel/isr.h"
+#include "kernel/pic.h"
 
-/* Port-era task-system stubs. vmm.c references these for
-   default_pml4() + user_ptr_ok(); until L4 they return NULL so
-   vmm falls back to the kernel PML4. */
+/* Task-system stubs — vmm.c references these; L4 will implement. */
 struct task;
 struct task *task_current(void) { return (void *)0; }
 uint64_t *task_current_pml4(void) { return (uint64_t *)0; }
 
 extern void serial_init(void);
+extern char stack_top;
 
-static void l2_self_test(void) {
-    serial_printf("\n[l2] self-test: pmm alloc + vmm map/write/read/unmap\n");
+static volatile int int80_fired;
+static volatile int timer_tick_count;
 
-    uint64_t frame = pmm_alloc_frame();
-    serial_printf("[l2]   pmm_alloc_frame -> 0x%lx\n", (uint64_t)frame);
-    if (frame == 0) { serial_printf("[l2]   FAIL: no frame\n"); return; }
+static registers_t *int80_handler(registers_t *regs) {
+    int80_fired = 1;
+    serial_printf("[l3] INT 0x80 handler fired. rdi=0x%lx rsi=0x%lx\n",
+                  regs->rdi, regs->rsi);
+    return regs;
+}
 
-    /* Pick a canonical low-half VA well beyond the 1 GiB identity
-       map so walk_create must allocate fresh PDPT/PD/PT. The
-       identity map uses 2 MiB huge pages in PML4[0]→PDPT[0]→PD[*];
-       VA 0x40000000 lands at PDPT[1] where the slot is empty. */
-    uint64_t va = 0x0000000040000000ULL;
-    vmm_map_page(va, frame, VMM_FLAG_WRITE | VMM_FLAG_USER);
+static registers_t *timer_handler(registers_t *regs) {
+    timer_tick_count++;
+    return regs;
+}
 
-    volatile uint64_t *p = (volatile uint64_t *)(uintptr_t)va;
-    p[0] = 0xDEADBEEFCAFEBABEULL;
-    p[1] = 0x0123456789ABCDEFULL;
+static void install_timer(void) {
+    /* PIT channel 0, rate generator, ~100 Hz */
+    uint16_t div = 1193180 / 100;
+    __asm__ volatile ("outb %0, $0x43" :: "a"((uint8_t)0x36));
+    __asm__ volatile ("outb %0, $0x40" :: "a"((uint8_t)(div & 0xFF)));
+    __asm__ volatile ("outb %0, $0x40" :: "a"((uint8_t)((div >> 8) & 0xFF)));
+    pic_clear_mask(0);
+    isr_register_handler(32, timer_handler);
+}
 
-    uint64_t phys = vmm_get_physical(va);
-    serial_printf("[l2]   vmm_get_physical(0x%lx) = 0x%lx (expected 0x%lx)\n",
-                  va, phys, frame);
-    serial_printf("[l2]   read-back: 0x%lx 0x%lx\n", p[0], p[1]);
+static void l3_self_test(void) {
+    serial_printf("\n[l3] self-test: installing INT 0x80 handler...\n");
+    isr_register_handler(0x80, int80_handler);
 
-    vmm_unmap_page(va);
-    uint64_t phys2 = vmm_get_physical(va);
-    serial_printf("[l2]   after unmap, vmm_get_physical = 0x%lx (expected 0)\n", phys2);
+    int80_fired = 0;
+    __asm__ volatile (
+        "mov $0xCAFEBABE, %%rdi\n\t"
+        "mov $0x12345678, %%rsi\n\t"
+        "int $0x80\n\t"
+        ::: "rdi", "rsi", "memory"
+    );
+    serial_printf("[l3]   int80_fired=%d\n", int80_fired);
 
-    pmm_free_frame(frame);
-
-    if (phys == frame && p[0] == 0 /* unreachable once unmapped */) {
-        /* The read after unmap would fault; we never reach here. */
+    serial_printf("[l3] enabling IRQs, waiting for timer...\n");
+    install_timer();
+    __asm__ volatile ("sti");
+    int start = timer_tick_count;
+    /* Busy-wait for ~50 ticks (half a second) to prove IRQs fire. */
+    while (timer_tick_count - start < 50) {
+        __asm__ volatile ("hlt");
     }
-    serial_printf("[l2]   free frames remaining: %u / %u\n",
-                  pmm_get_free_count(), pmm_get_total_count());
-    serial_printf("[l2] self-test complete\n");
+    serial_printf("[l3]   timer ticks: %d (delta=%d)\n",
+                  timer_tick_count, timer_tick_count - start);
+    __asm__ volatile ("cli");
 }
 
 void kernel_main(uint32_t magic, multiboot_info_t *mbi) {
     serial_init();
 
     serial_printf("\n================================\n");
-    serial_printf("LighthOS L2: 4-level paging\n");
+    serial_printf("LighthOS L3: IDT + ISRs online\n");
     serial_printf("================================\n");
     serial_printf("  multiboot magic: 0x%x\n", magic);
-    serial_printf("  mbi phys       : 0x%lx\n", (uint64_t)(uintptr_t)mbi);
 
     if (magic != MULTIBOOT_MAGIC) {
         serial_printf("  bad multiboot magic; halting.\n");
@@ -79,8 +95,13 @@ void kernel_main(uint32_t magic, multiboot_info_t *mbi) {
     pmm_init(mbi);
     vmm_init();
 
-    l2_self_test();
+    gdt_init();
+    tss_init((uint64_t)(uintptr_t)&stack_top);
+    pic_init();
+    idt_init();
 
-    serial_printf("\nhalting.\n");
+    l3_self_test();
+
+    serial_printf("\n[l3] complete. halting.\n");
     for (;;) __asm__ volatile ("cli; hlt");
 }

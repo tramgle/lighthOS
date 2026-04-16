@@ -1,6 +1,7 @@
+bits 64
 global tss_flush
 
 tss_flush:
-    mov ax, 0x2B    ; TSS selector (0x28) | RPL 3
+    mov ax, 0x28            ; TSS selector
     ltr ax
     ret
