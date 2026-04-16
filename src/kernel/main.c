@@ -25,23 +25,11 @@
 #include "kernel/task.h"
 #include "kernel/process.h"
 #include "kernel/syscall.h"
+#include "kernel/timer.h"
+#include "drivers/vga.h"
+#include "drivers/serial.h"
 
-extern void serial_init(void);
 extern char stack_top;
-
-/* PIT @ 100 Hz. */
-static registers_t *timer_handler(registers_t *regs) {
-    return schedule(regs);
-}
-
-static void install_timer(void) {
-    uint16_t div = 1193180 / 100;
-    __asm__ volatile ("outb %0, $0x43" :: "a"((uint8_t)0x36));
-    __asm__ volatile ("outb %0, $0x40" :: "a"((uint8_t)(div & 0xFF)));
-    __asm__ volatile ("outb %0, $0x40" :: "a"((uint8_t)((div >> 8) & 0xFF)));
-    pic_clear_mask(0);
-    isr_register_handler(32, timer_handler);
-}
 
 static void *multiboot_first_module(multiboot_info_t *mbi, uint64_t *size_out) {
     if (!(mbi->flags & MULTIBOOT_FLAG_MODS) || mbi->mods_count == 0) return 0;
@@ -62,10 +50,12 @@ static void *multiboot_first_module(multiboot_info_t *mbi, uint64_t *size_out) {
 #define KHEAP_SIZE (8 * 1024 * 1024)                    /* 8 MiB */
 
 void kernel_main(uint32_t magic, multiboot_info_t *mbi) {
+    vga_init();
     serial_init();
+    boot_log_enable();
 
     kprintf("\n================================\n");
-    kprintf("LighthOS x86_64 L5: userland spawn\n");
+    kprintf("LighthOS x86_64: booting\n");
     kprintf("================================\n");
 
     if (magic != MULTIBOOT_MAGIC) {
@@ -86,7 +76,8 @@ void kernel_main(uint32_t magic, multiboot_info_t *mbi) {
     tss_init((uint64_t)(uintptr_t)&stack_top);
     pic_init();
     idt_init();
-    install_timer();
+    timer_init(100);
+    serial_init_irq();
     syscall_init();
 
     task_init();

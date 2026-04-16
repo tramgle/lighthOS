@@ -1,8 +1,11 @@
 #include "drivers/vga.h"
 #include "include/io.h"
 #include "lib/string.h"
+#include "mm/vmm.h"
 
-static uint16_t *vga_buffer = (uint16_t *)0xB8000;
+/* VGA text framebuffer. Phys 0xB8000, reached through the kernel
+   HHDM because PML4[0] is user-private once vmm_init runs. */
+static uint16_t *vga_buffer = (uint16_t *)(KERNEL_HHDM_BASE + 0xB8000ULL);
 static int vga_row;
 static int vga_col;
 static uint8_t vga_color_attr;

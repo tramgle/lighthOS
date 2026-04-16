@@ -48,11 +48,16 @@ ifeq ($(PORT_MINIMAL),1)
     src/kernel/task.c \
     src/kernel/process.c \
     src/kernel/syscall.c \
+    src/kernel/panic.c \
+    src/kernel/debug.c \
+    src/kernel/timer.c \
     src/mm/pmm.c \
     src/mm/vmm.c \
     src/mm/heap.c \
     src/lib/string.c \
-    src/port/shim.c
+    src/lib/kprintf.c \
+    src/drivers/vga.c \
+    src/drivers/serial.c
   S_SOURCES := \
     src/boot/boot.s \
     src/kernel/gdt_flush.s \

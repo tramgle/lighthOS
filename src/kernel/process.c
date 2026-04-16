@@ -35,6 +35,13 @@ void process_init(void) {
     memset(processes, 0, sizeof(processes));
 }
 
+/* Drivers (serial.c) reach into process state for Ctrl-C / Ctrl-Z
+   routing. Weak stubs until the foreground-pgid layer is re-ported. */
+void process_kill_foreground(void) __attribute__((weak));
+void process_kill_foreground(void) { }
+void process_stop_foreground(void) __attribute__((weak));
+void process_stop_foreground(void) { }
+
 process_t *process_current(void) {
     task_t *t = task_current();
     if (!t) return 0;
