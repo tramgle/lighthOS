@@ -118,6 +118,15 @@ build_paging_tables:
     mov [boot_pml4 + 0*8], eax
     mov dword [boot_pml4 + 0*8 + 4], 0
 
+    ; PML4[256] → PDPT_LOW (HHDM at 0xFFFF800000000000).
+    ; vmm_init installs the same entry in the new kernel PML4 so
+    ; kernel code has unbroken access to physical memory through
+    ; the CR3 switch.
+    mov eax, boot_pdpt_low
+    or  eax, PRESENT | WRITE
+    mov [boot_pml4 + 256*8], eax
+    mov dword [boot_pml4 + 256*8 + 4], 0
+
     ; PML4[511] → PDPT_HIGH (higher-half kernel at -2 GiB)
     mov eax, boot_pdpt_high
     or  eax, PRESENT | WRITE

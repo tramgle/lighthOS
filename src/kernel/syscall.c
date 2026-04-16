@@ -30,6 +30,7 @@
 #define SYS_WAITPID  7
 #define SYS_GETPID  20
 #define SYS_YIELD   24
+#define SYS_FORK    57
 #define SYS_SPAWN  120
 #define SYS_SHUTDOWN 201
 
@@ -76,6 +77,9 @@ static registers_t *syscall_handler(registers_t *regs) {
     case SYS_YIELD:
         /* yield will happen on return through schedule() */
         regs->rax = 0;
+        break;
+    case SYS_FORK:
+        regs->rax = (uint64_t)(int64_t)process_fork(regs);
         break;
     case SYS_WAITPID: {
         int status = 0;

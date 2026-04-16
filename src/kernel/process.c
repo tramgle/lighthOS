@@ -236,12 +236,77 @@ void process_exit(int code) {
     for (;;) __asm__ volatile ("hlt");
 }
 
+/* Walk parent's PML4[0..255] and duplicate every user 4 KiB page
+   into fresh child frames. Kernel half is already shared via
+   vmm_new_pml4 so we don't touch PML4[256..511]. Returns 0 on OK,
+   -1 on OOM. */
+static int duplicate_user_space(uint64_t *parent_pml4, uint64_t *child_pml4) {
+    for (uint32_t i4 = 0; i4 < 256; i4++) {
+        uint64_t e4 = parent_pml4[i4];
+        if (!(e4 & VMM_FLAG_PRESENT)) continue;
+        uint64_t *p_pdpt = (uint64_t *)phys_to_virt_low(e4 & PTE_ADDR_MASK);
+        for (uint32_t i3 = 0; i3 < 512; i3++) {
+            uint64_t e3 = p_pdpt[i3];
+            if (!(e3 & VMM_FLAG_PRESENT) || (e3 & VMM_FLAG_HUGE)) continue;
+            uint64_t *p_pd = (uint64_t *)phys_to_virt_low(e3 & PTE_ADDR_MASK);
+            for (uint32_t i2 = 0; i2 < 512; i2++) {
+                uint64_t e2 = p_pd[i2];
+                if (!(e2 & VMM_FLAG_PRESENT) || (e2 & VMM_FLAG_HUGE)) continue;
+                uint64_t *p_pt = (uint64_t *)phys_to_virt_low(e2 & PTE_ADDR_MASK);
+                for (uint32_t i1 = 0; i1 < 512; i1++) {
+                    uint64_t e1 = p_pt[i1];
+                    if (!(e1 & VMM_FLAG_PRESENT)) continue;
+                    uint64_t va = ((uint64_t)i4 << 39) | ((uint64_t)i3 << 30) |
+                                  ((uint64_t)i2 << 21) | ((uint64_t)i1 << 12);
+                    uint64_t src_phys = e1 & PTE_ADDR_MASK;
+                    uint64_t dst_phys = pmm_alloc_frame();
+                    if (!dst_phys) return -1;
+                    memcpy(phys_to_virt_low(dst_phys),
+                           phys_to_virt_low(src_phys), PAGE_SIZE);
+                    vmm_map_in(child_pml4, va, dst_phys, e1 & 0xFFF);
+                }
+            }
+        }
+    }
+    return 0;
+}
+
 int process_fork(registers_t *parent_regs) {
-    (void)parent_regs;
-    /* Deferred — current L5a milestone covers spawn + waitpid + exit
-       only. fork needs user-page duplication which is another block
-       of code; scheduled for L5b. */
-    return -1;
+    process_t *parent = process_current();
+    if (!parent) return -1;
+
+    process_t *child = process_alloc(parent->name);
+    if (!child) return -1;
+    child->parent_pid = parent->pid;
+
+    for (int i = 0; i < FD_MAX; i++) child->fds[i] = parent->fds[i];
+
+    uint64_t *child_pml4 = vmm_new_pml4();
+    if (!child_pml4) { child->alive = false; return -1; }
+    if (duplicate_user_space(parent->task->pml4, child_pml4) < 0) {
+        vmm_free_pml4(child_pml4);
+        child->alive = false;
+        return -1;
+    }
+
+    task_t *t = task_alloc(child->name);
+    if (!t) { vmm_free_pml4(child_pml4); child->alive = false; return -1; }
+    t->pml4 = child_pml4;
+
+    /* Plant a registers_t at the top of the child's kernel stack
+       that mirrors the parent's interrupted frame, with RAX=0 so
+       fork() returns 0 in the child. schedule() will pick up this
+       task, restore CR3/TSS, and iretq back to ring 3 at the
+       parent's saved RIP on the child's user stack. */
+    uint64_t stack_top = t->stack_base + TASK_STACK_SIZE;
+    registers_t *cf = (registers_t *)(uintptr_t)(stack_top - sizeof(registers_t));
+    *cf = *parent_regs;
+    cf->rax = 0;
+    t->rsp = (uint64_t)(uintptr_t)cf;
+
+    child->task = t;
+    task_insert_ready(t);
+    return (int)child->pid;
 }
 
 void process_list_all(void) {

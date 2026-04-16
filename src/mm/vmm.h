@@ -30,11 +30,16 @@
    and src/boot/boot.s PDPT_HIGH[510] → PD[0..511]. */
 #define KERNEL_VMA_BASE   0xFFFFFFFF80000000ULL
 
-/* Convert a physical address in the direct-map region to a kernel-
-   virtual pointer. Since low 1 GiB is identity-mapped in the active
-   PML4, casting the physical address to a pointer works directly. */
+/* Kernel HHDM (higher-half direct-map) base. vmm_init installs a
+   physmap of phys [0, 1 GiB) at this VA so kernel code can reach
+   any physical page by VA = HHDM_BASE + phys, regardless of which
+   per-process PML4 is live. Lives in PML4[256] so every user PML4
+   inherits it via the shared kernel half (PML4[256..511]). */
+#define KERNEL_HHDM_BASE  0xFFFF800000000000ULL
+
+/* Convert a direct-map physical address to a kernel-virtual pointer. */
 static inline void *phys_to_virt_low(uint64_t phys) {
-    return (void *)(uintptr_t)phys;
+    return (void *)(uintptr_t)(phys + KERNEL_HHDM_BASE);
 }
 
 void      vmm_init(void);

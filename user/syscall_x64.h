@@ -24,6 +24,7 @@
 #define SYS_WAITPID  7
 #define SYS_GETPID  20
 #define SYS_YIELD   24
+#define SYS_FORK    57
 #define SYS_SPAWN  120
 #define SYS_SHUTDOWN 201
 
@@ -61,6 +62,7 @@ static inline long sys_waitpid(int pid, int *status) {
     return _syscall2(SYS_WAITPID, pid, (long)(uintptr_t)status);
 }
 static inline void sys_shutdown(void)          { _syscall0(SYS_SHUTDOWN); }
+static inline long sys_fork(void)               { return _syscall0(SYS_FORK); }
 
 static inline size_t ustrlen(const char *s) {
     size_t n = 0; while (s[n]) n++; return n;

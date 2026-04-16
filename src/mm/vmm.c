@@ -56,7 +56,7 @@ static inline uint32_t pd_idx  (uint64_t va) { return (va >> 21) & 0x1FF; }
 static inline uint32_t pt_idx  (uint64_t va) { return (va >> 12) & 0x1FF; }
 
 static inline uint64_t *entry_to_table(uint64_t entry) {
-    return (uint64_t *)(uintptr_t)(entry & PTE_ADDR_MASK);
+    return (uint64_t *)phys_to_virt_low(entry & PTE_ADDR_MASK);
 }
 
 static uint64_t alloc_table(const char *what) {
@@ -133,43 +133,43 @@ static void install_huge_2m(uint64_t *pd_table, uint32_t pd_i,
 }
 
 void vmm_init(void) {
-    /* Build the kernel PML4 from pmm'd frames. We replace boot.s's
-       bootstrap tables entirely. */
     kernel_pml4_phys = alloc_table("kernel pml4");
     kernel_pml4 = (uint64_t *)phys_to_virt_low(kernel_pml4_phys);
 
-    /* PML4[0]: identity map of phys [0, 1 GiB) via one PDPT with
-       one PD of 512 × 2 MiB huge pages. */
-    uint64_t pdpt_low_phys = alloc_table("pdpt_low");
-    uint64_t pd_low_phys   = alloc_table("pd_low");
-    uint64_t *pdpt_low = phys_to_virt_low(pdpt_low_phys);
-    uint64_t *pd_low   = phys_to_virt_low(pd_low_phys);
+    /* HHDM: PML4[256] → PDPT that maps phys [0, 1 GiB) at VMA
+       KERNEL_HHDM_BASE (0xFFFF800000000000). Kernel code uses this
+       for any physical-memory access so the kernel keeps working
+       after CR3 switches to a user PML4 (user PML4[0..255] is
+       private, but [256..511] is shared). */
+    uint64_t pdpt_hhdm_phys = alloc_table("pdpt_hhdm");
+    uint64_t pd_hhdm_phys   = alloc_table("pd_hhdm");
+    uint64_t *pdpt_hhdm = phys_to_virt_low(pdpt_hhdm_phys);
+    uint64_t *pd_hhdm   = phys_to_virt_low(pd_hhdm_phys);
 
-    pdpt_low[0] = pd_low_phys | VMM_FLAG_PRESENT | VMM_FLAG_WRITE;
+    pdpt_hhdm[0] = pd_hhdm_phys | VMM_FLAG_PRESENT | VMM_FLAG_WRITE;
     for (uint32_t i = 0; i < 512; i++) {
-        install_huge_2m(pd_low, i,
+        install_huge_2m(pd_hhdm, i,
                         (uint64_t)i * 0x200000ULL,
                         VMM_FLAG_WRITE | VMM_FLAG_GLOBAL);
     }
-    kernel_pml4[0] = pdpt_low_phys | VMM_FLAG_PRESENT | VMM_FLAG_WRITE;
+    kernel_pml4[256] = pdpt_hhdm_phys | VMM_FLAG_PRESENT | VMM_FLAG_WRITE;
 
-    /* PML4[511]: higher-half kernel image. Same 1 GiB of phys, but
-       at VMA 0xFFFFFFFF80000000. Use PDPT[510] (since bits 30..38
-       of 0xFFFFFFFF80000000 are 510). We can reuse pd_low — both
-       views point at the same physical memory. */
+    /* PML4[511]: higher-half kernel image at VMA 0xFFFFFFFF80000000.
+       Reuses pd_hhdm — same 1 GiB backing, different VA. */
     uint64_t pdpt_high_phys = alloc_table("pdpt_high");
     uint64_t *pdpt_high = phys_to_virt_low(pdpt_high_phys);
-    pdpt_high[510] = pd_low_phys | VMM_FLAG_PRESENT | VMM_FLAG_WRITE;
+    pdpt_high[510] = pd_hhdm_phys | VMM_FLAG_PRESENT | VMM_FLAG_WRITE;
     kernel_pml4[511] = pdpt_high_phys | VMM_FLAG_PRESENT | VMM_FLAG_WRITE;
 
-    /* Load CR3 with the physical address of the new PML4. The
-       higher-half mapping is equivalent to the boot tables, so the
-       instruction after the mov executes normally. */
+    /* PML4[0..255] stays zero — reserved for per-process user
+       space. Any user PML4 gets its own mappings there via
+       vmm_map_in / elf_load. */
+
     __asm__ volatile ("mov %0, %%cr3" :: "r"(kernel_pml4_phys) : "memory");
     current_cr3 = kernel_pml4;
 
     serial_printf("[vmm] 4-level paging online. "
-                  "pml4@0x%x identity-map=1GiB kernel@0xFFFFFFFF80000000\n",
+                  "kernel_pml4@0x%x HHDM@0xFFFF800000000000 kernel@0xFFFFFFFF80000000\n",
                   (uint32_t)kernel_pml4_phys);
 }
 
@@ -281,30 +281,32 @@ static void free_user_subtree(uint64_t *pml4) {
     }
 }
 
+/* Convert a HHDM kernel-virtual pointer back to its physical
+   address. Every PML4/PDPT/PD/PT pointer in this module is such:
+   pmm_alloc_frame returns phys, and we access it as phys_to_virt_low
+   (HHDM VA). */
+static inline uint64_t vka_to_phys(const void *p) {
+    return (uint64_t)(uintptr_t)p - KERNEL_HHDM_BASE;
+}
+
 void vmm_free_pml4(uint64_t *pml4) {
     if (!pml4 || pml4 == kernel_pml4) return;
     free_user_subtree(pml4);
-    /* Kernel half entries belong to kernel_pml4 — do NOT free those
-       frames. Just drop this PML4 page. */
-    uint64_t phys = (uint64_t)(uintptr_t)pml4;
-    pmm_free_frame(phys);
+    pmm_free_frame(vka_to_phys(pml4));
 }
 
 void vmm_unmap_user_space(uint64_t *pml4) {
     if (!pml4) return;
     free_user_subtree(pml4);
     if (pml4 == current_cr3) {
-        /* Flush TLB by reloading CR3. */
-        uint64_t phys = (uint64_t)(uintptr_t)pml4;
-        __asm__ volatile ("mov %0, %%cr3" :: "r"(phys) : "memory");
+        __asm__ volatile ("mov %0, %%cr3" :: "r"(vka_to_phys(pml4)) : "memory");
     }
 }
 
 void vmm_switch_pml4(uint64_t *pml4) {
     if (!pml4 || pml4 == current_cr3) return;
     current_cr3 = pml4;
-    uint64_t phys = (uint64_t)(uintptr_t)pml4;
-    __asm__ volatile ("mov %0, %%cr3" :: "r"(phys) : "memory");
+    __asm__ volatile ("mov %0, %%cr3" :: "r"(vka_to_phys(pml4)) : "memory");
 }
 
 /* --- User-pointer validation ----------------------------------- */

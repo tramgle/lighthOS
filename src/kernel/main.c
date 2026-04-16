@@ -45,9 +45,10 @@ static void install_timer(void) {
 
 static void *multiboot_first_module(multiboot_info_t *mbi, uint64_t *size_out) {
     if (!(mbi->flags & MULTIBOOT_FLAG_MODS) || mbi->mods_count == 0) return 0;
-    multiboot_mod_t *m = (multiboot_mod_t *)(uintptr_t)mbi->mods_addr;
+    /* mbi->mods_addr is a physical address; reach it through HHDM. */
+    multiboot_mod_t *m = (multiboot_mod_t *)phys_to_virt_low(mbi->mods_addr);
     *size_out = (uint64_t)(m->mod_end - m->mod_start);
-    return (void *)(uintptr_t)m->mod_start;
+    return (void *)phys_to_virt_low(m->mod_start);
 }
 
 /* Kernel heap must be reachable regardless of which PML4 is live.
@@ -74,6 +75,10 @@ void kernel_main(uint32_t magic, multiboot_info_t *mbi) {
 
     pmm_init(mbi);
     vmm_init();
+    /* vmm_init dropped the low-half identity map; rebase the mbi
+       pointer (and its embedded phys pointers, as they're used)
+       through HHDM so post-vmm code can still read it. */
+    mbi = (multiboot_info_t *)phys_to_virt_low((uint64_t)(uintptr_t)mbi);
     pmm_reserve_range(KHEAP_PHYS, KHEAP_SIZE);
     heap_init(KHEAP_VA, KHEAP_SIZE);
 

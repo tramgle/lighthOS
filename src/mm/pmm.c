@@ -74,7 +74,9 @@ void pmm_init(multiboot_info_t *mbi) {
        it via the identity map. */
     uint64_t kernel_end_phys = (uint64_t)(uintptr_t)&_kernel_phys_end;
     uint64_t bitmap_phys = (kernel_end_phys + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
-    bitmap = (uint32_t *)(uintptr_t)bitmap_phys;
+    /* Access the bitmap through the kernel HHDM so it remains
+       reachable when CR3 is pointed at a per-process PML4. */
+    bitmap = (uint32_t *)(uintptr_t)(bitmap_phys + 0xFFFF800000000000ULL);
 
     /* Start by marking every frame as used, then carve out the
        availables. */
