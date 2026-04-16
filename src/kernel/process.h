@@ -58,6 +58,9 @@ process_t *process_get(uint32_t pid);
 process_t *process_alloc(const char *name);
 int        process_spawn_from_memory(const char *name, const void *elf,
                                      uint64_t size, char *const argv[]);
+/* Read the ELF from `path` via the VFS into a heap buffer, then
+   spawn it. Returns the new pid or -1 on error. */
+int        process_spawn_from_path(const char *path, char *const argv[]);
 
 /* fd helpers — called from syscall.c. */
 int     fd_open(const char *path, uint32_t flags);

@@ -28,10 +28,21 @@
 #include "kernel/timer.h"
 #include "drivers/vga.h"
 #include "drivers/serial.h"
+#include "drivers/ata.h"
 #include "fs/vfs.h"
 #include "fs/ramfs.h"
+#include "fs/blkdev.h"
+#include "fs/fstab.h"
 
 extern char stack_top;
+
+/* FAT install partition on a LighthOS disk starts at LBA 2048.
+   The custom MBR/stage2 build (Makefile bootdisk target) stamps
+   MBR + stage2 + kernel into LBAs 0..2047, leaving the FAT
+   partition untouched. The kernel treats this offset as a
+   well-known constant rather than reading an MBR partition
+   table. */
+#define FAT_PARTITION_LBA 2048
 
 /* Pull each multiboot module into ramfs at the path given by its
    cmdline. GRUB entries like
@@ -127,21 +138,42 @@ void kernel_main(uint32_t magic, multiboot_info_t *mbi) {
     task_init();
     process_init();
 
-    /* Bring up a ramfs at '/' and stage every multiboot module
-       into it at its cmdline-declared path. */
+    /* VFS always starts with a ramfs at '/'. If multiboot modules
+       were provided (ISO boot path), stage them into it. If an ATA
+       drive is present (bootdisk path), register a FAT partition
+       at LBA FAT_PARTITION_LBA and let fstab swap the ramfs out
+       for the FAT root. vfs_mount's replace-on-collision makes the
+       handoff clean. */
     vfs_init();
     vfs_node_t *ramroot = ramfs_init();
     if (ramroot) vfs_mount("/", ramroot->ops, ramroot, 0);
-    populate_ramfs_from_modules(mbi);
 
-    /* Spawn the first multiboot module as the init process. */
-    uint64_t mod_size = 0;
-    void *mod = multiboot_first_module(mbi, &mod_size);
-    if (!mod) { kprintf("no init module loaded\n"); goto halt; }
+    int have_modules = (mbi->flags & MULTIBOOT_FLAG_MODS) && mbi->mods_count > 0;
+    if (have_modules) populate_ramfs_from_modules(mbi);
 
-    char *const argv[] = { (char *)"hello", 0 };
-    int pid = process_spawn_from_memory("hello", mod, mod_size, argv);
-    if (pid < 0) { kprintf("spawn failed\n"); goto halt; }
+    ata_init();
+    blkdev_t *ata = blkdev_get("ata0");
+    if (ata && !have_modules) {
+        uint32_t part_sects = ata->total_sectors > FAT_PARTITION_LBA
+                              ? ata->total_sectors - FAT_PARTITION_LBA : 0;
+        blkdev_partition(ata, FAT_PARTITION_LBA, part_sects, "ata0p0");
+        fstab_mount_defaults();
+    }
+
+    /* Pick the init path. Modules path: the first module is init.
+       Bootdisk path: the FAT root should have /bin/init (or a
+       similarly-named default). */
+    int pid = -1;
+    char *const argv[] = { (char *)"init", 0 };
+    if (have_modules) {
+        uint64_t mod_size = 0;
+        void *mod = multiboot_first_module(mbi, &mod_size);
+        if (mod) pid = process_spawn_from_memory("init", mod, mod_size, argv);
+    } else {
+        pid = process_spawn_from_path("/bin/init", argv);
+        if (pid < 0) pid = process_spawn_from_path("/bin/hello", argv);
+    }
+    if (pid < 0) { kprintf("spawn failed; no init found\n"); goto halt; }
     kprintf("[main] spawned pid %d\n", pid);
 
     task_enable_scheduling();

@@ -218,6 +218,25 @@ int process_spawn_from_memory(const char *name, const void *elf,
     return p->pid;
 }
 
+int process_spawn_from_path(const char *path, char *const argv[]) {
+    struct vfs_stat st;
+    if (vfs_stat(path, &st) != 0 || st.type != VFS_FILE) return -1;
+    if (st.size == 0) return -1;
+
+    uint8_t *buf = kmalloc(st.size);
+    if (!buf) return -1;
+    ssize_t r = vfs_read(path, buf, st.size, 0);
+    if (r != (ssize_t)st.size) { kfree(buf); return -1; }
+
+    /* Derive a short name from the last path component. */
+    const char *name = path;
+    for (const char *p = path; *p; p++) if (*p == '/') name = p + 1;
+
+    int pid = process_spawn_from_memory(name, buf, st.size, argv);
+    kfree(buf);
+    return pid;
+}
+
 int process_waitpid(uint32_t pid, int *status) {
     for (;;) {
         process_t *p = 0;

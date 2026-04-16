@@ -59,7 +59,11 @@ ifeq ($(PORT_MINIMAL),1)
     src/drivers/vga.c \
     src/drivers/serial.c \
     src/fs/vfs.c \
-    src/fs/ramfs.c
+    src/fs/ramfs.c \
+    src/fs/blkdev.c \
+    src/fs/fat.c \
+    src/fs/fstab.c \
+    src/drivers/ata.c
   S_SOURCES := \
     src/boot/boot.s \
     src/kernel/gdt_flush.s \
@@ -84,6 +88,29 @@ BUILD_USER      = build/user
 BUILD_USER_LIBC = build/user/libc
 BUILD_USER_LDSO = build/user/ldso
 DISK_IMG        = build/disk.img
+
+# x86_64-ported user binaries. Grows each time a user program is
+# brought back; replaces the legacy SIMPLE_USER set during the port.
+X64_USER        = hello forktest fstest
+X64_USER_TARGETS = $(addprefix $(BUILD_USER)/,$(X64_USER))
+
+X64_USER_CFLAGS = -std=gnu99 -ffreestanding -O2 -Wall -Wextra -nostdlib \
+                  -mno-red-zone
+
+$(BUILD_USER)/crt0.o: user/crt0.s
+	@mkdir -p $(dir $@)
+	nasm -f elf64 $< -o $@
+
+$(BUILD_USER)/%.o: user/%.c user/syscall_x64.h
+	@mkdir -p $(dir $@)
+	$(CC) $(X64_USER_CFLAGS) -c $< -o $@
+
+$(X64_USER_TARGETS): $(BUILD_USER)/%: $(BUILD_USER)/crt0.o $(BUILD_USER)/%.o
+	@mkdir -p $(dir $@)
+	x86_64-elf-ld -T user/user.ld -nostdlib -o $@ $^
+
+.PHONY: x64-userland
+x64-userland: $(X64_USER_TARGETS)
 
 .PHONY: all clean iso run run-disk run-vga debug docker-build docker-run test docker-test iso-ready user-programs fix-perms docker-lua-compile bootdisk run-bootdisk docker-bootdisk docker-disk test-iso docker-test-iso test-disk docker-test-disk run-installed
 
@@ -137,31 +164,19 @@ $(ISO): $(KERNEL_BIN) grub.cfg user-programs etc/fstab
 DISK_SIZE_MB    = 64
 DISK_FAT_OFFSET = 2048
 
-$(DISK_IMG): user-programs
+$(DISK_IMG): x64-userland
 	@mkdir -p $(dir $@)
 	@echo "Creating $(DISK_SIZE_MB) MB disk with FAT32 at LBA $(DISK_FAT_OFFSET)"
 	dd if=/dev/zero of=$@ bs=1M count=$(DISK_SIZE_MB) 2>/dev/null
 	mkfs.fat -F 32 -n LIGHTHOS --offset=$(DISK_FAT_OFFSET) $@ >/dev/null 2>&1
-	mmd -i $@@@$$(($(DISK_FAT_OFFSET)*512)) ::BIN ::LIB 2>/dev/null || true
-	@for f in $(SIMPLE_USER_TARGETS) $(BUILD_USER)/libc_test $(BUILD_USER)/lua \
-	          $(BUILD_USER)/dynhello $(BUILD_USER)/dyn_echo; do \
-		name=$$(basename $$f); \
-		mcopy -i $@@@$$(($(DISK_FAT_OFFSET)*512)) -D o $$f ::BIN/$$name; \
+	mmd -i $@@@$$(($(DISK_FAT_OFFSET)*512)) ::BIN 2>/dev/null || true
+	@for f in $(X64_USER_TARGETS); do \
+	    name=$$(basename $$f); \
+	    mcopy -i $@@@$$(($(DISK_FAT_OFFSET)*512)) -D o $$f ::BIN/$$name; \
 	done
-	@# Dynamic-linking runtime: ld.so + shared libs.
-	mcopy -i $@@@$$(($(DISK_FAT_OFFSET)*512)) -D o \
-	      $(SYSROOT_LIB)/ld-lighthos.so.1 ::LIB/ld-lighthos.so.1
-	mcopy -i $@@@$$(($(DISK_FAT_OFFSET)*512)) -D o \
-	      $(SYSROOT_LIB)/libulib.so.1 ::LIB/libulib.so.1
-	mcopy -i $@@@$$(($(DISK_FAT_OFFSET)*512)) -D o \
-	      $(SYSROOT_LIB)/libvibc.so.1 ::LIB/libvibc.so.1
-	mcopy -i $@@@$$(($(DISK_FAT_OFFSET)*512)) -D o \
-	      $(SYSROOT_LIB)/libtestdl.so.1 ::LIB/libtestdl.so.1
+	@# Copy init: pick hello as default so bootdisk boots the smoke test.
+	mcopy -i $@@@$$(($(DISK_FAT_OFFSET)*512)) -D o $(BUILD_USER)/hello ::BIN/init
 	@echo "$@ ready ($(DISK_SIZE_MB) MB, FAT32)"
-	@# No /etc/fstab on the disk: the kernel's built-in defaults
-	@# mount this partition at '/' directly. A user-written /etc/fstab
-	@# would be consulted here if we grew post-boot fstab rereading,
-	@# but that's a future feature.
 
 # Back-compat alias so `make disk.img` and `make docker-disk` still work.
 disk.img: $(DISK_IMG)
