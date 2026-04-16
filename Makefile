@@ -1,19 +1,42 @@
-TARGET  = i686-elf
+TARGET  = x86_64-elf
 CC      = $(TARGET)-gcc
 AS      = nasm
 AR      = $(TARGET)-ar
 LD      = $(TARGET)-gcc
 
 DEBUG_KERNEL ?= 0
-CFLAGS  = -std=gnu99 -ffreestanding -O2 -Wall -Wextra -Isrc -mno-sse -mno-mmx -mno-sse2 -DDEBUG_KERNEL=$(DEBUG_KERNEL)
-ASFLAGS = -f elf32
-LDFLAGS = -T linker.ld -nostdlib -lgcc -ffreestanding
+# x86_64 kernel flags:
+#   -mcmodel=kernel  — kernel image lives in the negative high-half
+#                      (0xFFFFFFFF80000000+); RIP-relative + sign-extended
+#                      32-bit displacements reach everything.
+#   -mno-red-zone    — kernel can't trust the 128-byte red zone; ISRs
+#                      would clobber it.
+#   -mno-sse*/-mmx   — no FPU/SIMD in kernel; save/restore not wired.
+#   -fno-pic         — kernel is loaded at a fixed VA, not relocated.
+CFLAGS  = -std=gnu99 -ffreestanding -O2 -Wall -Wextra -Isrc \
+          -mcmodel=kernel -mno-red-zone -mno-sse -mno-mmx -mno-sse2 \
+          -fno-pic -fno-pie -mgeneral-regs-only \
+          -DDEBUG_KERNEL=$(DEBUG_KERNEL)
+ASFLAGS = -f elf64
+LDFLAGS = -T linker.ld -nostdlib -lgcc -ffreestanding -no-pie \
+          -Wl,-z,max-page-size=0x1000 -mno-red-zone
 
 C_SOURCES = $(shell find src -name '*.c')
 # Exclude src/boot/disk/ — those are real-mode sources for the disk
 # bootloader, assembled as flat binaries rather than linked into the
 # kernel ELF.
 S_SOURCES = $(shell find src -name '*.s' -not -path 'src/boot/disk/*')
+
+# x86_64 port: during L1-L4 we progressively un-exclude files as
+# they're ported. For now only boot.s + main.c (the L1 minimal
+# kernel_main) link into the ELF; everything else still speaks
+# 32-bit inline asm / register layouts.
+# The variable PORT_MINIMAL defaults to 1 until the port is done.
+PORT_MINIMAL ?= 1
+ifeq ($(PORT_MINIMAL),1)
+  C_SOURCES := src/kernel/main.c
+  S_SOURCES := src/boot/boot.s
+endif
 
 C_OBJECTS = $(patsubst src/%.c, build/%.o, $(C_SOURCES))
 S_OBJECTS = $(patsubst src/%.s, build/%.o, $(S_SOURCES))
@@ -118,18 +141,18 @@ docker-disk:
 # run targets check that ISO exists; build it via Docker if missing.
 # -nographic routes all I/O (serial + monitor) to stdio. Ctrl-A X to quit.
 run: iso-ready
-	qemu-system-i386 -cdrom $(ISO) -nographic -m 128M
+	qemu-system-x86_64 -cdrom $(ISO) -nographic -m 128M
 
 run-disk: iso-ready $(DISK_IMG)
-	qemu-system-i386 -cdrom $(ISO) -drive file=$(DISK_IMG),format=raw,if=ide \
+	qemu-system-x86_64 -cdrom $(ISO) -drive file=$(DISK_IMG),format=raw,if=ide \
 		-nographic -m 128M
 
 # run-vga opens a graphical window (or VNC) with VGA, serial on stdio
 run-vga: iso-ready
-	qemu-system-i386 -cdrom $(ISO) -serial stdio -m 128M
+	qemu-system-x86_64 -cdrom $(ISO) -serial stdio -m 128M
 
 debug: iso-ready
-	qemu-system-i386 -cdrom $(ISO) -nographic -m 128M \
+	qemu-system-x86_64 -cdrom $(ISO) -nographic -m 128M \
 		-d int,cpu_reset -no-reboot -no-shutdown
 
 # run-gdb: boot the ISO with the kernel's gdb stub exposed on COM2
@@ -139,7 +162,7 @@ debug: iso-ready
 # Insert breakpoints by adding `gdb_break();` in kernel source or via
 # gdb's `break *0xADDR` (software int3 patched at runtime).
 run-gdb: iso-ready $(DISK_IMG)
-	qemu-system-i386 -cdrom $(ISO) -drive file=$(DISK_IMG),format=raw,if=ide \
+	qemu-system-x86_64 -cdrom $(ISO) -drive file=$(DISK_IMG),format=raw,if=ide \
 		-m 128M -nographic \
 		-serial mon:stdio \
 		-serial tcp::1234,server,nowait \
@@ -456,7 +479,7 @@ clean:
 
 test: clean
 	$(MAKE) CFLAGS="$(CFLAGS) -DRUN_TESTS" $(ISO)
-	timeout 10 qemu-system-i386 -cdrom $(ISO) -serial stdio \
+	timeout 10 qemu-system-x86_64 -cdrom $(ISO) -serial stdio \
 		-display none -no-reboot -m 128M 2>/dev/null; true
 	@# Clean up the test-flavored kernel build. Next `make all` or
 	@# `make docker-build` will produce a fresh runnable kernel.
@@ -514,14 +537,14 @@ docker-bootdisk:
 # Boot the disk image directly (no CDROM, no multiboot modules). If it
 # works, LighthOS is self-hosting for the install + boot flow.
 run-bootdisk: docker-bootdisk
-	qemu-system-i386 -drive file=build/bootdisk.img,format=raw,if=ide \
+	qemu-system-x86_64 -drive file=build/bootdisk.img,format=raw,if=ide \
 		-nographic -m 128M
 
 # Full "boot from installed drive" smoke test: build everything in
 # docker, create FAT32 disk via mcopy, stamp bootloader + kernel,
 # boot with disk as the ONLY media.
 run-installed: docker-build docker-disk docker-bootdisk
-	qemu-system-i386 -drive file=build/bootdisk.img,format=raw,if=ide \
+	qemu-system-x86_64 -drive file=build/bootdisk.img,format=raw,if=ide \
 		-nographic -m 128M
 
 docker-test:
@@ -568,7 +591,7 @@ test-disk:
 	@# then ACPI-shuts-down on exit. No stdin dance, no sleep-45
 	@# timing assumption. Redirect stdin from /dev/null so nothing
 	@# can keep qemu alive.
-	@timeout 90 qemu-system-i386 -cdrom build/lighthos-test.iso \
+	@timeout 90 qemu-system-x86_64 -cdrom build/lighthos-test.iso \
 	      -drive file=$(DISK_IMG),format=raw,if=ide \
 	      -nographic -m 128M </dev/null \
 	  | tee build/test-output.log >/dev/null
