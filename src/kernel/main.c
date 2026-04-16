@@ -1,11 +1,13 @@
 /*
- * L3 kernel_main — wires GDT + TSS + IDT + PIC and round-trips
- * an interrupt (both a software INT 0x80 and the timer IRQ0).
+ * L4 kernel_main — loads an ELF64 user binary, drops to ring 3,
+ * handles its INT 0x80 syscalls.
  *
- * Still a port-era kernel: no processes, no syscall dispatcher,
- * no userland. The self-test installs a one-shot handler, raises
- * INT 0x80, confirms the handler ran, then enables IRQs and waits
- * for the timer to prove IRQ path works too.
+ * GRUB passes hello_l4 as a multiboot module. We allocate a fresh
+ * PML4 (sharing kernel half), elf_load into it, set CR3, build a
+ * user stack, jump_to_usermode. The L4 user binary does two fake
+ * syscalls — a "write this buffer" and an "exit" — distinguished
+ * by sentinel RAX values. No real syscall dispatcher yet; that's
+ * L5 + userland ABI work.
  */
 
 #include "include/types.h"
@@ -19,89 +21,119 @@
 #include "kernel/idt.h"
 #include "kernel/isr.h"
 #include "kernel/pic.h"
+#include "kernel/elf.h"
 
-/* Task-system stubs — vmm.c references these; L4 will implement. */
 struct task;
 struct task *task_current(void) { return (void *)0; }
-uint64_t *task_current_pml4(void) { return (uint64_t *)0; }
+uint64_t    *g_user_pml4;
+uint64_t    *task_current_pml4(void) { return g_user_pml4; }
 
 extern void serial_init(void);
+extern void jump_to_usermode(uint64_t entry, uint64_t user_stack);
 extern char stack_top;
 
-static volatile int int80_fired;
-static volatile int timer_tick_count;
+#define USER_STACK_TOP 0x0000000000800000ULL  /* 8 MiB VA, one page below */
+#define USER_STACK_PAGES 4
 
-static registers_t *int80_handler(registers_t *regs) {
-    int80_fired = 1;
-    serial_printf("[l3] INT 0x80 handler fired. rdi=0x%lx rsi=0x%lx\n",
-                  regs->rdi, regs->rsi);
-    return regs;
-}
+/* L4 sentinel opcodes — see user/hello_l4.s. */
+#define L4_OP_WRITE  0x4C54
+#define L4_OP_EXIT   0x4C58
 
-static registers_t *timer_handler(registers_t *regs) {
-    timer_tick_count++;
-    return regs;
-}
+static volatile int l4_user_done;
+static volatile int l4_exit_code;
 
-static void install_timer(void) {
-    /* PIT channel 0, rate generator, ~100 Hz */
-    uint16_t div = 1193180 / 100;
-    __asm__ volatile ("outb %0, $0x43" :: "a"((uint8_t)0x36));
-    __asm__ volatile ("outb %0, $0x40" :: "a"((uint8_t)(div & 0xFF)));
-    __asm__ volatile ("outb %0, $0x40" :: "a"((uint8_t)((div >> 8) & 0xFF)));
-    pic_clear_mask(0);
-    isr_register_handler(32, timer_handler);
-}
-
-static void l3_self_test(void) {
-    serial_printf("\n[l3] self-test: installing INT 0x80 handler...\n");
-    isr_register_handler(0x80, int80_handler);
-
-    int80_fired = 0;
-    __asm__ volatile (
-        "mov $0xCAFEBABE, %%rdi\n\t"
-        "mov $0x12345678, %%rsi\n\t"
-        "int $0x80\n\t"
-        ::: "rdi", "rsi", "memory"
-    );
-    serial_printf("[l3]   int80_fired=%d\n", int80_fired);
-
-    serial_printf("[l3] enabling IRQs, waiting for timer...\n");
-    install_timer();
-    __asm__ volatile ("sti");
-    int start = timer_tick_count;
-    /* Busy-wait for ~50 ticks (half a second) to prove IRQs fire. */
-    while (timer_tick_count - start < 50) {
-        __asm__ volatile ("hlt");
+static registers_t *syscall_l4(registers_t *regs) {
+    switch (regs->rax) {
+    case L4_OP_WRITE: {
+        const char *s = (const char *)(uintptr_t)regs->rdi;
+        uint64_t n = regs->rsi;
+        serial_printf("[l4] user wrote: ");
+        for (uint64_t i = 0; i < n; i++) {
+            char c = s[i];
+            if (c == '\n') serial_printf("\\n");
+            serial_printf("%c", c);
+        }
+        serial_printf("\n");
+        regs->rax = (uint64_t)n;
+        return regs;
     }
-    serial_printf("[l3]   timer ticks: %d (delta=%d)\n",
-                  timer_tick_count, timer_tick_count - start);
-    __asm__ volatile ("cli");
+    case L4_OP_EXIT:
+        l4_user_done = 1;
+        l4_exit_code = (int)regs->rdi;
+        serial_printf("[l4] user exit: code=%d\n", l4_exit_code);
+        for (;;) __asm__ volatile ("cli; hlt");
+    default:
+        serial_printf("[l4] unknown syscall rax=0x%lx\n", regs->rax);
+        return regs;
+    }
+}
+
+static void *multiboot_first_module(multiboot_info_t *mbi, uint32_t *size_out) {
+    if (!(mbi->flags & MULTIBOOT_FLAG_MODS) || mbi->mods_count == 0) return 0;
+    multiboot_mod_t *m = (multiboot_mod_t *)(uintptr_t)mbi->mods_addr;
+    *size_out = m->mod_end - m->mod_start;
+    return (void *)(uintptr_t)m->mod_start;
+}
+
+static void l4_run_user(multiboot_info_t *mbi) {
+    uint32_t mod_size = 0;
+    void *mod = multiboot_first_module(mbi, &mod_size);
+    if (!mod) { serial_printf("[l4] no module loaded\n"); return; }
+    serial_printf("[l4] module @0x%lx size=%u\n",
+                  (uint64_t)(uintptr_t)mod, mod_size);
+
+    if (elf_validate(mod, mod_size) != 0) {
+        serial_printf("[l4] module is not a valid ELF64 x86-64 binary\n");
+        return;
+    }
+
+    uint64_t *pml4 = vmm_new_pml4();
+    g_user_pml4 = pml4;
+    uint64_t entry = elf_load(mod, mod_size, pml4);
+    if (!entry) { serial_printf("[l4] elf_load failed\n"); return; }
+    serial_printf("[l4] entry=0x%lx\n", entry);
+
+    /* Build a user stack: 4 pages at USER_STACK_TOP - USER_STACK_PAGES*4K. */
+    for (int i = 0; i < USER_STACK_PAGES; i++) {
+        uint64_t va = USER_STACK_TOP - (i + 1) * PAGE_SIZE;
+        uint64_t frame = pmm_alloc_frame();
+        memset(phys_to_virt_low(frame), 0, PAGE_SIZE);
+        vmm_map_in(pml4, va, frame, VMM_FLAG_WRITE | VMM_FLAG_USER);
+    }
+
+    /* Switch to user PML4 and install INT 0x80 handler. */
+    vmm_switch_pml4(pml4);
+    isr_register_handler(0x80, syscall_l4);
+
+    /* Set tss.rsp0 to our kernel stack so the CPU switches there
+       on the user→kernel transition. */
+    tss_set_kernel_stack((uint64_t)(uintptr_t)&stack_top);
+
+    serial_printf("[l4] dropping to ring 3...\n");
+    jump_to_usermode(entry, USER_STACK_TOP - 16);
 }
 
 void kernel_main(uint32_t magic, multiboot_info_t *mbi) {
     serial_init();
 
     serial_printf("\n================================\n");
-    serial_printf("LighthOS L3: IDT + ISRs online\n");
+    serial_printf("LighthOS L4: ELF64 + ring 3\n");
     serial_printf("================================\n");
-    serial_printf("  multiboot magic: 0x%x\n", magic);
 
     if (magic != MULTIBOOT_MAGIC) {
-        serial_printf("  bad multiboot magic; halting.\n");
+        serial_printf("bad multiboot magic; halting.\n");
         for (;;) __asm__ volatile ("cli; hlt");
     }
 
     pmm_init(mbi);
     vmm_init();
-
     gdt_init();
     tss_init((uint64_t)(uintptr_t)&stack_top);
     pic_init();
     idt_init();
 
-    l3_self_test();
+    l4_run_user(mbi);
 
-    serial_printf("\n[l3] complete. halting.\n");
+    serial_printf("\n[l4] fell through. halting.\n");
     for (;;) __asm__ volatile ("cli; hlt");
 }

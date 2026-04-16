@@ -133,6 +133,21 @@ void pmm_init(multiboot_info_t *mbi) {
         }
     }
 
+    /* Reserve multiboot modules so pmm_alloc_frame doesn't hand out
+       pages GRUB already populated with module data. */
+    if ((mbi->flags & (1u << 3)) && mbi->mods_count > 0) {
+        multiboot_mod_t *mods = (multiboot_mod_t *)(uintptr_t)mbi->mods_addr;
+        for (uint32_t i = 0; i < mbi->mods_count; i++) {
+            uint64_t start = (uint64_t)mods[i].mod_start;
+            uint64_t end   = (uint64_t)mods[i].mod_end;
+            /* Reserve the struct array itself too, in case it sits
+               in a frame the loop would otherwise hand out. */
+            pmm_reserve_range(start, end - start);
+        }
+        pmm_reserve_range((uint64_t)mbi->mods_addr,
+                          (uint64_t)mbi->mods_count * sizeof(multiboot_mod_t));
+    }
+
     serial_printf("[pmm] Total: %u frames (%u MiB). Free: %u. Bitmap @0x%x..0x%x\n",
                   total_frames,
                   (uint32_t)((uint64_t)total_frames * PAGE_SIZE / (1024 * 1024)),

@@ -1,26 +1,27 @@
-; jump_to_usermode(uint32_t entry, uint32_t user_stack)
-; Drops to ring 3 by doing an iret with user CS/SS selectors.
+; jump_to_usermode(uint64_t entry, uint64_t user_stack)
+; Drops to ring 3 via iretq. SysV AMD64: entry in RDI, stack in RSI.
+;
+; CPU pops SS, RSP, RFLAGS, CS, RIP in that order from the kernel
+; stack on iretq. We push them here.
+
+bits 64
 global jump_to_usermode
 
 jump_to_usermode:
-    mov ebx, [esp+4]    ; entry point
-    mov ecx, [esp+8]    ; user stack pointer
-
-    ; Set data segments to user data selector (0x20 | RPL 3 = 0x23)
+    ; data-seg selectors (user data = 0x20 | RPL 3 = 0x23)
     mov ax, 0x23
     mov ds, ax
     mov es, ax
     mov fs, ax
     mov gs, ax
 
-    ; Build iret frame for ring 0 -> ring 3 transition
-    ; CPU expects: SS, ESP, EFLAGS, CS, EIP (pushed in this order)
-    push dword 0x23     ; ss = user data
-    push ecx            ; esp = user stack
-    pushfd
-    pop eax
-    or eax, 0x200       ; ensure IF (interrupts enabled)
-    push eax            ; eflags
-    push dword 0x1B     ; cs = user code (0x18 | RPL 3)
-    push ebx            ; eip = entry point
-    iret
+    ; Build iretq frame (top of stack after pushes is RIP).
+    push qword 0x23                 ; SS  = user data | RPL 3
+    push rsi                        ; RSP = user stack
+    pushfq
+    pop rax
+    or  rax, 0x200                  ; IF=1 so IRQs are live in user
+    push rax                        ; RFLAGS
+    push qword 0x1B                 ; CS  = user code | RPL 3  (0x18|3)
+    push rdi                        ; RIP = entry
+    iretq

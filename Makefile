@@ -44,6 +44,7 @@ ifeq ($(PORT_MINIMAL),1)
     src/kernel/idt.c \
     src/kernel/isr.c \
     src/kernel/pic.c \
+    src/kernel/elf.c \
     src/mm/pmm.c \
     src/mm/vmm.c \
     src/lib/string.c \
@@ -53,7 +54,8 @@ ifeq ($(PORT_MINIMAL),1)
     src/kernel/gdt_flush.s \
     src/kernel/tss_flush.s \
     src/kernel/idt_flush.s \
-    src/kernel/isr_stub.s
+    src/kernel/isr_stub.s \
+    src/kernel/usermode.s
 endif
 
 C_OBJECTS = $(patsubst src/%.c, build/%.o, $(C_SOURCES))
