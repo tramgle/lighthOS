@@ -1,31 +1,34 @@
-global _start
-extern main
-extern environ
+; x86_64 user crt0. SysV AMD64 ABI.
+;
+; Kernel (process.c:build_user_stack) leaves the stack at entry as:
+;   [rsp+ 0]      argc
+;   [rsp+ 8]      argv[0]
+;   ...
+;   [rsp+8*N]     argv[argc] = NULL
+;   [rsp+...]     envp NULL
+;   [rsp+...]     auxv pairs + AT_NULL
+;
+; SysV AMD64: argc→RDI, argv→RSI, envp→RDX before calling main.
+; main's prologue expects (rsp % 16) == 8 on entry (because the
+; caller's `call` pushed a return address onto an already-16-
+; aligned stack). The kernel lays out `sp` as 16-aligned, so after
+; our `call main` the invariant holds.
 
+bits 64
 section .text
+
+extern main
+global _start
+
 _start:
-    ; SysV stack layout at entry:
-    ;   [esp+0]             = argc
-    ;   [esp+4]             = argv[0]
-    ;   ...
-    ;   [esp+4+4*argc]      = NULL       (argv terminator)
-    ;   [esp+8+4*argc]      = envp[0]    (or NULL if no env)
-    ;   ...                   NULL       (envp terminator)
-    ;                         auxv pairs, AT_NULL, 0
-    ;
-    ; Extract argc, argv, envp. Store envp in ulib's `environ` so
-    ; getenv/setenv see it. Call main(argc, argv, envp) — SysV calling
-    ; convention for user programs that want to peek at env.
-    mov eax, [esp]                    ; argc
-    lea edx, [esp + 4]                ; argv = &argv[0]
-    lea ecx, [edx + eax * 4 + 4]      ; envp = argv + (argc+1)*4
-    mov [environ], ecx
-    push ecx                          ; third arg: envp
-    push edx                          ; second arg: argv
-    push eax                          ; first arg: argc
+    mov rdi, [rsp]                   ; argc
+    lea rsi, [rsp + 8]               ; argv
+    mov rcx, rdi
+    lea rdx, [rsi + rcx*8 + 8]       ; envp = argv + (argc+1)*8
+    xor rbp, rbp                     ; clean frame-pointer for backtraces
     call main
-    ; sys_exit(return value)
-    mov ebx, eax
-    mov eax, 1
+    mov rdi, rax                     ; exit code = main's return
+    mov rax, 1                       ; SYS_EXIT
     int 0x80
-    jmp $
+.hang:
+    jmp .hang

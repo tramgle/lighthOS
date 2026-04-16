@@ -45,8 +45,12 @@ ifeq ($(PORT_MINIMAL),1)
     src/kernel/isr.c \
     src/kernel/pic.c \
     src/kernel/elf.c \
+    src/kernel/task.c \
+    src/kernel/process.c \
+    src/kernel/syscall.c \
     src/mm/pmm.c \
     src/mm/vmm.c \
+    src/mm/heap.c \
     src/lib/string.c \
     src/port/shim.c
   S_SOURCES := \
