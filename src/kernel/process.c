@@ -25,6 +25,7 @@
 #include "lib/string.h"
 #include "lib/kprintf.h"
 #include "drivers/serial.h"
+#include "drivers/console.h"
 #include "fs/vfs.h"
 #include "kernel/pipe.h"
 #include "kernel/elf.h"
@@ -754,10 +755,15 @@ ssize_t fd_read(int fd, void *buf, size_t n) {
     if (!fds || fd < 0 || fd >= FD_MAX) return -1;
     fd_entry_t *e = &fds[fd];
     if (e->type == FD_CONSOLE) {
+        /* Route through the console driver so keyboard + serial
+           converge on a single TTY. Loop one byte at a time so we
+           still honor the "stop at \n" contract that cooked-mode
+           callers (shell, vi's readline) expect. */
         char *out = buf;
         size_t i = 0;
         while (i < n) {
-            char c = serial_getchar();
+            char c;
+            if (console_read(&c, 1) != 1) break;
             out[i++] = c;
             if (c == '\n') break;
         }
@@ -778,12 +784,10 @@ ssize_t fd_write(int fd, const void *buf, size_t n) {
     if (!fds || fd < 0 || fd >= FD_MAX) return -1;
     fd_entry_t *e = &fds[fd];
     if (e->type == FD_CONSOLE) {
-        const char *s = buf;
-        for (size_t i = 0; i < n; i++) {
-            if (s[i] == '\n') serial_putchar('\r');
-            serial_putchar(s[i]);
-        }
-        return (ssize_t)n;
+        /* console_write handles both halves of the TTY: serial gets
+           raw bytes (\n mapped to \r\n), VGA gets the same bytes with
+           ANSI CSI decoded to cursor ops. */
+        return console_write(buf, n);
     }
     if (e->type == FD_FILE) {
         ssize_t r = vfs_write(e->path, buf, n, (off_t)e->offset);
