@@ -21,4 +21,13 @@ void tss_init(uint64_t rsp0) {
                   tss.rsp0, tss.ist[0]);
 }
 
-void tss_set_kernel_stack(uint64_t rsp) { tss.rsp0 = rsp; }
+extern void syscall_set_kernel_stack(uint64_t rsp);
+
+void tss_set_kernel_stack(uint64_t rsp) {
+    tss.rsp0 = rsp;
+    /* Keep the SYSCALL entry's kernel-rsp stash in sync with the
+       TSS's rsp0. The interrupt gate uses rsp0; the SYSCALL insn
+       uses its own per-CPU word since the CPU doesn't switch
+       stacks for us there. */
+    syscall_set_kernel_stack(rsp);
+}

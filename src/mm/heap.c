@@ -6,6 +6,13 @@ typedef struct heap_block {
     uint64_t size;
     bool     is_free;
     struct heap_block *next;
+    uint64_t _pad;              /* force sizeof to 32 so returned
+                                   pointers stay 16-byte aligned — the
+                                   SysV AMD64 ABI assumes locals with
+                                   __attribute__((aligned(16))) live on
+                                   a 16-aligned stack, which breaks if
+                                   task kernel stacks come back at
+                                   offset 24 from a 16-aligned base. */
 } heap_block_t;
 
 #define HEADER_SIZE (sizeof(heap_block_t))

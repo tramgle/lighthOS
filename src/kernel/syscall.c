@@ -117,7 +117,7 @@ struct user_vfs_stat {
     uint32_t size;
 };
 
-static registers_t *syscall_handler(registers_t *regs) {
+registers_t *syscall_handler(registers_t *regs) {
     uint64_t num = regs->rax;
     uint64_t a1 = regs->rdi;
     uint64_t a2 = regs->rsi;
@@ -448,9 +448,71 @@ mmap_done:
             trace_ring[__entry_pos % STRACE_RING].ret = (int64_t)regs->rax;
         }
     }
+
+    /* The interrupt path delivers pending signals from isr_handler's
+       tail, but SYSCALL bypasses that. Hook it in here so a signal
+       queued by e.g. self-kill is picked up on the same hop back to
+       user space. SYS_SIGRETURN is the one case we must skip — regs
+       has just been reloaded from sig_saved_regs and redelivering
+       would clobber it. */
+    if (num != SYS_SIGRETURN) process_deliver_pending_signals(regs);
     return regs;
 }
 
+/* SYSCALL/SYSRET-class MSRs. Values are the CPU-fixed numbers. */
+#define MSR_EFER            0xC0000080ULL
+#define MSR_STAR            0xC0000081ULL
+#define MSR_LSTAR           0xC0000082ULL
+#define MSR_CSTAR           0xC0000083ULL
+#define MSR_FMASK           0xC0000084ULL
+#define EFER_SCE            (1ULL << 0)
+
+extern void syscall_entry_64(void);
+extern uint64_t syscall_kernel_rsp;   /* from syscall_entry.s */
+
+static inline uint64_t rdmsr(uint32_t msr) {
+    uint32_t lo, hi;
+    __asm__ volatile ("rdmsr" : "=a"(lo), "=d"(hi) : "c"(msr));
+    return ((uint64_t)hi << 32) | lo;
+}
+static inline void wrmsr(uint32_t msr, uint64_t val) {
+    uint32_t lo = (uint32_t)val, hi = (uint32_t)(val >> 32);
+    __asm__ volatile ("wrmsr" :: "a"(lo), "d"(hi), "c"(msr));
+}
+
+void syscall_set_kernel_stack(uint64_t rsp) {
+    syscall_kernel_rsp = rsp;
+}
+
 void syscall_init(void) {
+    /* Keep INT 0x80 registered as a debuggable fallback. Real user
+       code goes through the SYSCALL MSRs below. */
     isr_register_handler(0x80, syscall_handler);
+
+    /* Enable the SYSCALL/SYSRET instruction pair via EFER.SCE. */
+    wrmsr(MSR_EFER, rdmsr(MSR_EFER) | EFER_SCE);
+
+    /* STAR layout matched to gdt.c:
+         [47:32] = 0x08 → kernel CS; kernel SS is implicit at CS+8 (0x10).
+         [63:48] = 0x18 → on sysretq CPU sets CS = 0x18+16 | 3 = 0x2B,
+                            SS = 0x18+8 | 3 = 0x23.
+       Low 32 bits are unused in long mode. */
+    wrmsr(MSR_STAR, (0x08ULL << 32) | (0x18ULL << 48));
+
+    /* Handler RIP. */
+    wrmsr(MSR_LSTAR, (uint64_t)(uintptr_t)&syscall_entry_64);
+
+    /* Clear IF,DF,TF on syscall entry — keeps interrupts off while
+       the entry stub swaps stacks, strips direction-flag state. */
+    wrmsr(MSR_FMASK, 0x200 | 0x400 | 0x100);
+
+    /* CSTAR is the compat-mode entry; we don't support it. Point at
+       a safe stub (same as LSTAR) so a stray sysenter from compat
+       mode doesn't dispatch through garbage. */
+    wrmsr(MSR_CSTAR, (uint64_t)(uintptr_t)&syscall_entry_64);
+
+    /* Initial kernel stack (the boot stack). task_init/schedule will
+       override via syscall_set_kernel_stack once processes exist. */
+    extern uint8_t stack_top[];
+    syscall_kernel_rsp = (uint64_t)(uintptr_t)stack_top;
 }

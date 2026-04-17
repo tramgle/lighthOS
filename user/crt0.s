@@ -29,6 +29,6 @@ _start:
     call main
     mov rdi, rax                     ; exit code = main's return
     mov rax, 1                       ; SYS_EXIT
-    int 0x80
+    syscall
 .hang:
     jmp .hang

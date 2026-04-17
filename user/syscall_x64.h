@@ -81,22 +81,22 @@ struct vfs_stat {
 
 static inline long _syscall0(long num) {
     long ret;
-    __asm__ volatile ("int $0x80" : "=a"(ret) : "a"(num) : "memory");
+    __asm__ volatile ("syscall" : "=a"(ret) : "a"(num) : "rcx", "r11", "memory");
     return ret;
 }
 static inline long _syscall1(long num, long a1) {
     long ret;
-    __asm__ volatile ("int $0x80" : "=a"(ret) : "a"(num), "D"(a1) : "memory");
+    __asm__ volatile ("syscall" : "=a"(ret) : "a"(num), "D"(a1) : "rcx", "r11", "memory");
     return ret;
 }
 static inline long _syscall2(long num, long a1, long a2) {
     long ret;
-    __asm__ volatile ("int $0x80" : "=a"(ret) : "a"(num), "D"(a1), "S"(a2) : "memory");
+    __asm__ volatile ("syscall" : "=a"(ret) : "a"(num), "D"(a1), "S"(a2) : "rcx", "r11", "memory");
     return ret;
 }
 static inline long _syscall3(long num, long a1, long a2, long a3) {
     long ret;
-    __asm__ volatile ("int $0x80" : "=a"(ret) : "a"(num), "D"(a1), "S"(a2), "d"(a3) : "memory");
+    __asm__ volatile ("syscall" : "=a"(ret) : "a"(num), "D"(a1), "S"(a2), "d"(a3) : "rcx", "r11", "memory");
     return ret;
 }
 
@@ -161,10 +161,10 @@ static inline long sys_mprotect(void *addr, size_t len, long prot) {
 static inline long _syscall4(long num, long a1, long a2, long a3, long a4) {
     long ret;
     register long r10 __asm__("r10") = a4;
-    __asm__ volatile ("int $0x80"
+    __asm__ volatile ("syscall"
                       : "=a"(ret)
                       : "a"(num), "D"(a1), "S"(a2), "d"(a3), "r"(r10)
-                      : "memory");
+                      : "rcx", "r11", "memory");
     return ret;
 }
 static inline long sys_mount(const char *src, const char *mp,

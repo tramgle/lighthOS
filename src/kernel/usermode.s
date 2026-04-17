@@ -22,6 +22,6 @@ jump_to_usermode:
     pop rax
     or  rax, 0x200                  ; IF=1 so IRQs are live in user
     push rax                        ; RFLAGS
-    push qword 0x1B                 ; CS  = user code | RPL 3  (0x18|3)
+    push qword 0x2B                 ; CS  = user code | RPL 3  (0x28|3)
     push rdi                        ; RIP = entry
     iretq

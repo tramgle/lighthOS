@@ -616,7 +616,7 @@ int process_execve_from_memory(registers_t *regs, const char *name,
     regs->rip = entry;
     regs->rsp = rsp;
     regs->rflags = 0x202;                    /* IF=1 */
-    regs->cs = 0x1B;
+    regs->cs = 0x2B;
     regs->ss = 0x23;
     regs->rax = regs->rbx = regs->rcx = regs->rdx = 0;
     regs->rsi = regs->rdi = regs->rbp = 0;
