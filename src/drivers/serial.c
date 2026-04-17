@@ -10,6 +10,7 @@
 static char serial_buffer[SERIAL_BUF_SIZE];
 static volatile uint32_t serial_read_idx;
 static volatile uint32_t serial_write_idx;
+static uint32_t line_len;       /* chars on the current input line */
 
 static int serial_is_transmit_empty(void) {
     return inb(SERIAL_COM1 + 5) & 0x20;
@@ -125,19 +126,30 @@ static registers_t *serial_callback(registers_t *regs) {
 
         if (c == '\r') c = '\n';
         if (c == 0x7F) c = '\b';
-        serial_enqueue(c);
 
-        /* Line-discipline-lite: echo the character back so users see
-           what they type. Printable bytes go out verbatim; Enter ends
-           the line (CR+LF); backspace rubs out the previous glyph. */
-        if (c == '\n') {
-            serial_putchar('\r');
-            serial_putchar('\n');
-        } else if (c == '\b') {
+        /* Line-discipline-lite: track how many bytes are live on the
+           current line so backspace can't chew into the prompt.
+           line_len counts chars typed since the last newline; a
+           backspace at the start is swallowed (no buffer push, no
+           visible rub-out). Reset on newline. */
+        if (c == '\b') {
+            if (line_len == 0) continue;
+            line_len--;
+            serial_enqueue(c);
             serial_putchar('\b');
             serial_putchar(' ');
             serial_putchar('\b');
+            continue;
+        }
+
+        serial_enqueue(c);
+
+        if (c == '\n') {
+            line_len = 0;
+            serial_putchar('\r');
+            serial_putchar('\n');
         } else if (c >= 0x20 && c < 0x7F) {
+            line_len++;
             serial_putchar(c);
         }
     }

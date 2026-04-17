@@ -64,6 +64,16 @@ static inline long u_readline(int fd, char *buf, size_t cap) {
         long n = sys_read(fd, &c, 1);
         if (n < 0) return -1;
         if (n == 0) break;
+        if (c == '\b' || c == 0x7F) {
+            /* Backspace: drop the last character in the buffer. The
+               kernel's serial line-discipline already painted the
+               rub-out sequence on screen, so don't mirror it here —
+               just keep the buffer in sync with what the user sees.
+               Stops at i==0 so you can't chew into state that was
+               never typed. */
+            if (i > 0) i--;
+            continue;
+        }
         buf[i++] = c;
         if (c == '\n') break;
     }
