@@ -46,7 +46,7 @@ DISK_IMG        = build/disk.img
 # x86_64-ported user binaries. Grows each time a user program is
 # brought back; replaces the legacy SIMPLE_USER set during the port.
 X64_USER        = hello forktest fstest \
-                  runtests shell assert bomb find \
+                  runtests shell assert bomb find rm stty \
                   echo cat wc head tail grep cp mv touch ls sleep mkdir \
                   mount umount chroot mmaptest env envtest \
                   sigtest alarmtest strace \

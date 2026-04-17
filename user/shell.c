@@ -226,6 +226,46 @@ static int run_line(char *line) {
         }
         if (u_strcmp(cmd, "true") == 0)  return 0;
         if (u_strcmp(cmd, "false") == 0) return 1;
+        if (u_strcmp(cmd, "cd") == 0) {
+            const char *dest = (stages[0].argc > 1) ? stages[0].argv[1] : "/";
+            if (sys_chdir(dest) != 0) {
+                u_puts_n("cd: "); u_puts_n(dest); u_puts_n(": not a directory\n");
+                return 1;
+            }
+            return 0;
+        }
+        if (u_strcmp(cmd, "pwd") == 0) {
+            char buf[256];
+            long n = sys_getcwd(buf, sizeof buf);
+            if (n < 0) { u_puts_n("pwd: failed\n"); return 1; }
+            u_puts_n(buf); u_putc('\n');
+            return 0;
+        }
+        if (u_strcmp(cmd, "clear") == 0) {
+            u_puts_n("\033[2J\033[H");
+            return 0;
+        }
+        if (u_strcmp(cmd, "help") == 0) {
+            u_puts_n(
+                "Built-ins: cd pwd exit true false jobs fg bg clear help\n"
+                "Programs:  see /bin — e.g. ls, cat, echo, grep, vi, ps, free,\n"
+                "           lsblk, find, strace, lua, mount, umount, chroot.\n"
+                "Pipes:   a | b | c   redirect: > file  >> file   bg: &\n"
+                "History: up/down arrows   Tab: complete /bin name\n");
+            return 0;
+        }
+        if (u_strcmp(cmd, "bg") == 0) {
+            /* Resume the most recent stopped job (SIGCONT) and detach.
+               Our jobs[] only tracks backgrounded pids; stopped jobs
+               come from Ctrl-Z on a foreground process, which the
+               kernel set as STOPPED. Send SIGCONT to every tracked
+               job to cover both cases. */
+            for (int i = MAX_JOBS - 1; i >= 0; i--) {
+                if (jobs[i].alive) { sys_kill(jobs[i].pid, SIG_CONT); return 0; }
+            }
+            u_puts_n("bg: no jobs\n");
+            return 1;
+        }
         if (u_strcmp(cmd, "jobs") == 0) {
             /* `jobs` with redirect: fork so we can redirect stdout. */
             if (redir_out) {

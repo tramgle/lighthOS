@@ -207,6 +207,15 @@ static inline long sys_getpgid(int pid) {
 #define SYS_PS       200
 #define SYS_MEMINFO  210
 #define SYS_BLKDEVS  215
+#define SYS_CHDIR     12
+#define SYS_GETCWD   183
+
+static inline long sys_chdir(const char *path) {
+    return _syscall1(SYS_CHDIR, (long)(uintptr_t)path);
+}
+static inline long sys_getcwd(char *buf, size_t cap) {
+    return _syscall2(SYS_GETCWD, (long)(uintptr_t)buf, (long)cap);
+}
 
 struct proc_info {
     uint32_t pid;

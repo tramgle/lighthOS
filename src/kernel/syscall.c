@@ -286,6 +286,54 @@ mmap_done:
         }
         break;
 
+    case SYS_CHDIR: {
+        /* Resolve the user path through the current cwd + chroot,
+           then store as the new chroot-local cwd. Rejects anything
+           that isn't a directory. */
+        const char *path = (const char *)(uintptr_t)a1;
+        process_t *p = process_current();
+        if (!p) { regs->rax = (uint64_t)(int64_t)-1; break; }
+        char resolved[VFS_MAX_PATH];
+        if (process_resolve_path(path, resolved, sizeof resolved) < 0) {
+            regs->rax = (uint64_t)(int64_t)-1; break;
+        }
+        struct vfs_stat st;
+        if (vfs_stat(resolved, &st) != 0 || st.type != VFS_DIR) {
+            regs->rax = (uint64_t)(int64_t)-1; break;
+        }
+        /* Strip the chroot root so what we store is chroot-local.
+           resolved starts with p->root; skip that prefix. For an
+           unrooted process (p->root == "/"), no prefix to strip —
+           we keep the leading '/'. */
+        const char *root = p->root[0] ? p->root : "/";
+        int ri = 0;
+        if (root[0] == '/' && root[1] == 0) {
+            ri = 0;                 /* no chroot, keep full path */
+        } else {
+            while (root[ri] && resolved[ri] == root[ri]) ri++;
+            if (root[ri] != 0) { regs->rax = (uint64_t)(int64_t)-1; break; }
+        }
+        const char *tail = resolved + ri;
+        if (!*tail) tail = "/";
+        int k = 0;
+        while (tail[k] && k < VFS_MAX_PATH - 1) { p->cwd[k] = tail[k]; k++; }
+        p->cwd[k] = 0;
+        regs->rax = 0;
+        break;
+    }
+
+    case SYS_GETCWD: {
+        char *buf = (char *)(uintptr_t)a1;
+        uint64_t cap = a2;
+        process_t *p = process_current();
+        if (!p || !buf || cap == 0) { regs->rax = (uint64_t)(int64_t)-1; break; }
+        int n = 0;
+        while (p->cwd[n] && (uint64_t)n < cap - 1) { buf[n] = p->cwd[n]; n++; }
+        buf[n] = 0;
+        regs->rax = (uint64_t)n;
+        break;
+    }
+
     case SYS_CHROOT: {
         process_t *p = process_current();
         if (!p) { regs->rax = (uint64_t)(int64_t)-1; break; }

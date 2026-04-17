@@ -54,7 +54,11 @@ static char stdout_buf[BUFSIZ];
 static char stderr_buf[BUFSIZ];
 
 static FILE _stdin  = { 0, 0 /*RDONLY*/, _IONBF, stdin_buf,  BUFSIZ, 0, 0, 0, 0, 0 };
-static FILE _stdout = { 1, 1 /*WRONLY*/, _IOLBF, stdout_buf, BUFSIZ, 0, 0, 0, 0, 0 };
+/* stdout is unbuffered by default: terminal sessions interleave raw
+   sys_writes (shell echo, u_puts_n) with stdio writes (vi's printf),
+   and line-buffering reorders them. Callers that want batched output
+   can setvbuf themselves. */
+static FILE _stdout = { 1, 1 /*WRONLY*/, _IONBF, stdout_buf, BUFSIZ, 0, 0, 0, 0, 0 };
 static FILE _stderr = { 2, 1 /*WRONLY*/, _IONBF, stderr_buf, BUFSIZ, 0, 0, 0, 0, 0 };
 
 FILE *stdin  = &_stdin;

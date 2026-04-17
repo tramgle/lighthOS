@@ -107,7 +107,7 @@ int main(int argc, char **argv, char **envp) {
         }
     }
 
-    if (path_count == 0) return list_one("/", want_long, want_all);
+    if (path_count == 0) return list_one(".", want_long, want_all);
 
     int rc = 0;
     for (int i = 0; i < path_count; i++) {
