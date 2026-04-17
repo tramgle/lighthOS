@@ -49,6 +49,7 @@
 #define SYS_TCSETPGRP   55   /* Set terminal foreground pgid. */
 #define SYS_TTY_WINSZ   56   /* op=0 get, op=1 set. See dispatch. */
 #define SYS_TTY_POLL    58   /* 1 = input byte pending, 0 = nothing. */
+#define SYS_VGA_GFX     60   /* Enter mode 13h + map FB; return user VA. */
 
 /* mmap/mprotect protection flags. PROT_EXEC is documented but not
    enforced — our paging setup has no NX bit at the i386 level. */

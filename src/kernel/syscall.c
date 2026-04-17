@@ -18,6 +18,7 @@
 #include "mm/heap.h"
 #include "lib/string.h"
 #include "drivers/serial.h"
+#include "drivers/vga.h"
 
 /* Thin wrappers so the SYS_EXECVE case body reads cleanly even
    though heap.h's names don't have module-prefix namespacing. */
@@ -528,6 +529,26 @@ mmap_done:
            never get answered. */
         regs->rax = (serial_has_data() ? 1 : 0);
         break;
+
+    case SYS_VGA_GFX: {
+        /* Switch to VGA mode 13h and alias the framebuffer at a
+           fixed user VA chosen by the caller (a1). No-ops if called
+           twice — the caller gets back the same VA either way.
+           Returns the user VA on success, -1 on failure. */
+        uint64_t user_va = a1 & ~0xFFFULL;
+        if (!user_va) { regs->rax = (uint64_t)(int64_t)-1; break; }
+        uint64_t *pml4 = task_current_pml4();
+        if (!pml4) { regs->rax = (uint64_t)(int64_t)-1; break; }
+        for (int i = 0; i < VGA_MODE13_PAGES; i++) {
+            vmm_map_in(pml4,
+                       user_va + (uint64_t)i * PAGE_SIZE,
+                       VGA_MODE13_PHYS + (uint64_t)i * PAGE_SIZE,
+                       VMM_FLAG_PRESENT | VMM_FLAG_WRITE | VMM_FLAG_USER);
+        }
+        vga_mode13_enter();
+        regs->rax = user_va;
+        break;
+    }
 
     case SYS_TTY_WINSZ: {
         /* op=0: get — fill *a2=rows, *a3=cols (uint16_t pointers).

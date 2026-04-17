@@ -213,6 +213,7 @@ static inline long sys_getpgid(int pid) {
 #define SYS_TCSETPGRP 55
 #define SYS_TTY_WINSZ 56
 #define SYS_TTY_POLL  58
+#define SYS_VGA_GFX   60
 #define SYS_BLKDEVS  215
 #define SYS_CHDIR     12
 #define SYS_GETCWD   183
@@ -312,6 +313,13 @@ static inline long sys_tty_setsize(int rows, int cols) {
    the terminal may never answer. */
 static inline long sys_tty_poll(void) {
     return _syscall0(SYS_TTY_POLL);
+}
+/* Switch the console to VGA mode 13h (320x200x256) and alias the
+   0xA0000 framebuffer at the caller-supplied user VA (page-aligned).
+   Returns the same VA on success, -1 on failure. One-way — text
+   mode isn't restored. Pair with sys_shutdown() on exit. */
+static inline long sys_vga_gfx(uint64_t user_va) {
+    return _syscall1(SYS_VGA_GFX, (long)user_va);
 }
 
 static inline size_t ustrlen(const char *s) {

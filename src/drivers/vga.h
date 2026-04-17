@@ -35,4 +35,14 @@ void vga_get_cursor(int *row, int *col);
 void vga_putchar_at(char c, int row, int col);
 void vga_backspace(void);
 
+/* Switch to VGA mode 13h: 320x200 256-color linear framebuffer at
+   phys 0xA0000. After this point the text-mode primitives above
+   are no-ops (they'd poke 0xB8000 which is unmapped in graphics
+   mode). No vga_mode13_exit for now — the game runs until shutdown. */
+void vga_mode13_enter(void);
+
+#define VGA_MODE13_PHYS    0xA0000ULL
+#define VGA_MODE13_BYTES   (320 * 200)
+#define VGA_MODE13_PAGES   16        /* 64 KiB rounded up from 64000 */
+
 #endif
