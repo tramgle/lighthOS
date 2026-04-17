@@ -92,18 +92,18 @@ static int readline_repl(char *buf, int max, const char *prompt) {
             break;
         }
         if (c == '\n') break;
+        /* The kernel serial driver is in cooked mode: it echoes every
+           printable byte, handles backspace, and collapses \r→\n
+           before delivering bytes here. So we keep our buffer in
+           sync but emit nothing — echoing here would double-print. */
         if (c == '\b' || c == 0x7f) {
-            if (pos > 0) { pos--; fputs("\b \b", stdout); fflush(stdout); }
+            if (pos > 0) pos--;
             continue;
         }
         if (c >= ' ' && c < 127) {
             buf[pos++] = (char)c;
-            fputc(c, stdout);
-            fflush(stdout);
         }
     }
-    fputc('\n', stdout);
-    fflush(stdout);
     buf[pos] = '\0';
     return pos;
 }
