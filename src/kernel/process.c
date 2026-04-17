@@ -19,6 +19,7 @@
 #include "kernel/tss.h"
 #include "kernel/gdt.h"
 #include "kernel/panic.h"
+#include "kernel/timer.h"
 #include "mm/heap.h"
 #include "mm/vmm.h"
 #include "mm/pmm.h"
@@ -132,6 +133,7 @@ process_t *process_alloc(const char *name) {
             p->root[0] = '/'; p->root[1] = 0;
             p->cwd[0] = '/';  p->cwd[1] = 0;
             p->pgid = p->pid;
+            p->start_ticks = timer_get_ticks();
             return p;
         }
     }
@@ -420,6 +422,14 @@ int process_waitpid(uint32_t pid, int *status) {
         if (!p) return -1;
         if (!p->alive) {
             if (status) *status = p->exit_code;
+            /* Fold the dying child's CPU time (plus any grandchildren
+               it already reaped) into our own cumulative-child totals
+               so /bin/time can report it. */
+            process_t *par = process_current();
+            if (par) {
+                par->cutime_ticks += p->utime_ticks + p->cutime_ticks;
+                par->cstime_ticks += p->stime_ticks + p->cstime_ticks;
+            }
             p->reaped = true;
             return (int)pid;
         }

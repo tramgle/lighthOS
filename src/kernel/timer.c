@@ -2,6 +2,7 @@
 #include "kernel/isr.h"
 #include "kernel/task.h"
 #include "kernel/pic.h"
+#include "kernel/process.h"
 #include "include/io.h"
 #include "lib/kprintf.h"
 
@@ -15,6 +16,15 @@ extern void process_tick_alarms(void);
 
 static registers_t *timer_callback(registers_t *regs) {
     tick_count++;
+    /* Attribute this tick to the currently-running process. We
+       bucket by the interrupted frame's privilege (CS&3==3 =
+       user). The idle task has no backing process, so
+       process_current() returns NULL and the tick is unattributed. */
+    process_t *p = process_current();
+    if (p) {
+        if ((regs->cs & 3) == 3) p->utime_ticks++;
+        else                     p->stime_ticks++;
+    }
     process_tick_alarms();
     return schedule(regs);
 }

@@ -149,6 +149,12 @@ static int compose_pid_status(uint32_t pid, char *out, int cap) {
     char st[2] = { task_state_char(proc->task ? (uint32_t)proc->task->state : 4u),
                    '\0' };
     p = append_str(out, cap, p, st);
+    p = append_str(out, cap, p, "\nUTime: ");
+    p = append_u  (out, cap, p, proc->utime_ticks);
+    p = append_str(out, cap, p, "\nSTime: ");
+    p = append_u  (out, cap, p, proc->stime_ticks);
+    p = append_str(out, cap, p, "\nStartTicks: ");
+    p = append_u  (out, cap, p, proc->start_ticks);
     p = append_str(out, cap, p, "\n");
     return p;
 }
@@ -245,6 +251,14 @@ static vfs_node_t *procfs_finddir(vfs_node_t *dir, const char *name) {
             return new_node("meminfo", VFS_FILE, PROC_MEMINFO, 0);
         if (strcmp(name, "mounts") == 0)
             return new_node("mounts",  VFS_FILE, PROC_MOUNTS, 0);
+        /* /proc/self — snapshot the current process's pid into a
+           PROC_PID_DIR. No real symlinks yet; this gives callers the
+           same ergonomics for finding their own status/cmdline. */
+        if (strcmp(name, "self") == 0) {
+            process_t *cur = process_current();
+            if (!cur) return 0;
+            return new_node("self", VFS_DIR, PROC_PID_DIR, cur->pid);
+        }
         uint32_t pid;
         if (is_all_digits(name, &pid) && process_get(pid))
             return new_node(name, VFS_DIR, PROC_PID_DIR, pid);

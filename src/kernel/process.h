@@ -74,6 +74,18 @@ typedef struct process {
     /* alarm_ticks: 100 Hz countdown set by SYS_ALARM. Timer IRQ
        decrements; reaches 0 queues SIG_ALRM. */
     uint32_t    alarm_ticks;
+    /* CPU-time accounting in 100 Hz ticks. Attribution happens in
+       timer_callback: each tick is charged to process_current() and
+       bucketed by the interrupted frame's ring (CS & 3). Granularity
+       is 10 ms — sub-tick bursts land wherever the clock happened to
+       fire. waitpid() folds a reaped child's times into cutime/cstime
+       so /bin/time can read them off the parent. start_ticks is set
+       at fork/spawn; execve preserves times (same process). */
+    uint64_t    utime_ticks;
+    uint64_t    stime_ticks;
+    uint64_t    cutime_ticks;
+    uint64_t    cstime_ticks;
+    uint64_t    start_ticks;
     /* Spawn trampoline metadata, populated by process_spawn/execve
        and consumed on first schedule. Per-process so concurrent
        spawns don't race. */
