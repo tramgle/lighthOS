@@ -446,7 +446,13 @@ run-disk: iso-ready $(DISK_IMG)
 # stays at the 24x80 default since no VT terminal is attached to
 # answer CSI-6n — vi + other programs that honor it lay out in 24
 # text rows + 1 status row = 25 = VGA text-mode geometry. Match.
-run-vga: docker-bootdisk
+run-vga:
+	@if [ ! -f build/bootdisk.img ]; then \
+	    echo "build/bootdisk.img missing — building a fresh one"; \
+	    $(MAKE) docker-bootdisk; \
+	else \
+	    echo "using existing build/bootdisk.img (rm it to force a rebuild)"; \
+	fi
 	qemu-system-x86_64 -drive file=build/bootdisk.img,format=raw,if=ide \
 		-m 128M -serial file:build/serial.log
 
@@ -463,7 +469,13 @@ run-vga-iso: iso-ready
 # Don't use this if you want the VGA editor to look right; use
 # plain `run-vga` instead. Good for dev loops where you want to
 # type at the serial side and watch output on VGA.
-run-vga-both: docker-bootdisk
+run-vga-both:
+	@if [ ! -f build/bootdisk.img ]; then \
+	    echo "build/bootdisk.img missing — building a fresh one"; \
+	    $(MAKE) docker-bootdisk; \
+	else \
+	    echo "using existing build/bootdisk.img (rm it to force a rebuild)"; \
+	fi
 	qemu-system-x86_64 -drive file=build/bootdisk.img,format=raw,if=ide \
 		-m 128M -serial stdio
 
@@ -582,7 +594,19 @@ docker-bootdisk:
 
 # Boot the disk image directly (no CDROM, no multiboot modules). If it
 # works, LighthOS is self-hosting for the install + boot flow.
-run-bootdisk: docker-bootdisk
+#
+# Skips the bootdisk rebuild when build/bootdisk.img already exists —
+# the whole point of run-bootdisk is to test file persistence across
+# reboots, so regenerating the image from scratch every time defeats
+# the purpose. `make bootdisk` or `rm build/bootdisk.img` forces a
+# fresh one. `run-installed` is the "clean slate" entry point.
+run-bootdisk:
+	@if [ ! -f build/bootdisk.img ]; then \
+	    echo "build/bootdisk.img missing — building a fresh one"; \
+	    $(MAKE) docker-bootdisk; \
+	else \
+	    echo "using existing build/bootdisk.img (rm it to force a rebuild)"; \
+	fi
 	qemu-system-x86_64 -drive file=build/bootdisk.img,format=raw,if=ide \
 		-nographic -m 128M
 
