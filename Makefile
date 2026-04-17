@@ -45,20 +45,31 @@ DISK_IMG        = build/disk.img
 
 # x86_64-ported user binaries. Grows each time a user program is
 # brought back; replaces the legacy SIMPLE_USER set during the port.
-X64_USER        = hello forktest fstest \
-                  runtests shell assert bomb find rm stty \
-                  echo cat wc head tail grep cp mv touch ls sleep mkdir \
-                  mount umount chroot mmaptest env envtest \
-                  sigtest alarmtest strace \
-                  hexdump pagemap regions \
+# X64_USER_TEST  — test harness + in-system test binaries. Shipped on
+#                  the test ISO only; kept out of the production
+#                  ISO/bootdisk/disk image so those don't carry probe
+#                  programs that a real user would never run.
+# X64_USER_PROD  — everything a user would actually want at a prompt.
+# X64_USER       — union; what X64_USER_TARGETS + per-binary linker
+#                  rules iterate.
+X64_USER_TEST   = runtests assert forktest fstest mmaptest envtest \
+                  sigtest alarmtest \
                   test_pid test_fork test_fs test_stream test_pgroup test_xmm \
-                  test_winsize flappy
+                  test_winsize
+X64_USER_PROD   = hello shell bomb find rm stty \
+                  echo cat wc head tail grep cp mv touch ls sleep mkdir \
+                  mount umount chroot env \
+                  strace \
+                  hexdump pagemap regions \
+                  flappy
+X64_USER        = $(X64_USER_PROD) $(X64_USER_TEST)
 # Binaries that need libvibc (stdio.h, printf, string.h) get their
 # own linker rules below — not added to X64_USER so the generic
 # pattern rule doesn't pick them up with the wrong linkage.
 X64_USER_LIBC   = ps lsblk free install
 # Simple single-source user targets built via the pattern rule below.
 X64_USER_TARGETS = $(addprefix $(BUILD_USER)/,$(X64_USER))
+X64_USER_PROD_TARGETS = $(addprefix $(BUILD_USER)/,$(X64_USER_PROD))
 # User targets with their own build rules (libvibc/libulib linkage):
 # lua + vi + the libc-linked tools below. Added to the ISO/disk
 # staging list explicitly.
@@ -355,14 +366,18 @@ $(ISO): $(KERNEL_BIN) grub.cfg x64-userland \
         build/sysroot/usr/lib/libvibc.so.1 \
         build/sysroot/usr/lib/libtestdl.so.1 \
         build/sysroot/usr/lib/ld-lighthos.so.1
+	@# Wipe any binaries that lingered from an earlier build — otherwise
+	@# a file removed from X64_USER_PROD still rides along inside the ISO.
+	@rm -rf build/iso/boot
 	@mkdir -p build/iso/boot/grub build/iso/boot/lib
 	cp $(KERNEL_BIN) build/iso/boot/lighthos.bin
 	cp grub.cfg build/iso/boot/grub/grub.cfg
 	@# Stage each ported user binary into the ISO so grub.cfg's
 	@# `module /boot/<name> /bin/<name>` lines can drop them into
-	@# ramfs at the declared paths.
-	@for f in $(X64_USER_TARGETS) $(X64_USER_EXTRA) $(BUILD_USER)/dynhello \
-	          $(BUILD_USER)/dyn_echo $(BUILD_USER)/dlopentest; do \
+	@# ramfs at the declared paths. Production-only — test harness
+	@# (runtests, assert, test_*, *test) stays on the test ISO.
+	@for f in $(X64_USER_PROD_TARGETS) $(X64_USER_EXTRA) $(BUILD_USER)/dynhello \
+	          $(BUILD_USER)/dyn_echo; do \
 	    name=$$(basename $$f); \
 	    if [ -x $$f ]; then cp $$f build/iso/boot/$$name; fi; \
 	done
@@ -393,8 +408,8 @@ $(DISK_IMG): x64-userland \
 	mkfs.fat -F 32 -n LIGHTHOS --offset=$(DISK_FAT_OFFSET) $@ >/dev/null 2>&1
 	mmd -i $@@@$$(($(DISK_FAT_OFFSET)*512)) ::BIN 2>/dev/null || true
 	mmd -i $@@@$$(($(DISK_FAT_OFFSET)*512)) ::LIB 2>/dev/null || true
-	@for f in $(X64_USER_TARGETS) $(X64_USER_EXTRA) $(BUILD_USER)/dynhello \
-	          $(BUILD_USER)/dyn_echo $(BUILD_USER)/dlopentest; do \
+	@for f in $(X64_USER_PROD_TARGETS) $(X64_USER_EXTRA) $(BUILD_USER)/dynhello \
+	          $(BUILD_USER)/dyn_echo; do \
 	    name=$$(basename $$f); \
 	    mcopy -i $@@@$$(($(DISK_FAT_OFFSET)*512)) -D o $$f ::BIN/$$name; \
 	done
@@ -598,6 +613,7 @@ build/lighthos-test.iso: $(KERNEL_BIN) grub-test.cfg x64-userland \
                          build/sysroot/usr/lib/ld-lighthos.so.1 \
                          build/sysroot/usr/lib/luamod.so \
                          $(TEST_VSH)
+	@rm -rf build/iso-test/boot
 	@mkdir -p build/iso-test/boot/grub build/iso-test/boot/tests build/iso-test/boot/lib
 	cp $(KERNEL_BIN) build/iso-test/boot/lighthos.bin
 	cp grub-test.cfg build/iso-test/boot/grub/grub.cfg
