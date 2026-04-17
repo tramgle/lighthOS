@@ -99,6 +99,8 @@ int     fd_dup2(int oldfd, int newfd);
 int     fd_pipe(int fds[2]);
 
 /* Signal plumbing. */
+void     process_kill_foreground(void);
+void     process_stop_foreground(void);
 int64_t process_signal(int signo, uint64_t handler);
 int     process_kill(int32_t pid, int signo);   /* pid<0 kills pgid=-pid */
 void    process_tick_alarms(void);

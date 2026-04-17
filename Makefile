@@ -27,53 +27,6 @@ C_SOURCES = $(shell find src -name '*.c')
 # kernel ELF.
 S_SOURCES = $(shell find src -name '*.s' -not -path 'src/boot/disk/*')
 
-# x86_64 port: during L1-L4 we progressively un-exclude files as
-# they're ported. For now only boot.s + main.c (the L1 minimal
-# kernel_main) link into the ELF; everything else still speaks
-# 32-bit inline asm / register layouts.
-# The variable PORT_MINIMAL defaults to 1 until the port is done.
-PORT_MINIMAL ?= 1
-ifeq ($(PORT_MINIMAL),1)
-  # Sources that have been ported to x86_64 so far. Each milestone
-  # grows this list. When the last file is ported, flip PORT_MINIMAL
-  # back to 0 and delete src/port/shim.c.
-  C_SOURCES := \
-    src/kernel/main.c \
-    src/kernel/gdt.c \
-    src/kernel/tss.c \
-    src/kernel/idt.c \
-    src/kernel/isr.c \
-    src/kernel/pic.c \
-    src/kernel/elf.c \
-    src/kernel/task.c \
-    src/kernel/process.c \
-    src/kernel/syscall.c \
-    src/kernel/panic.c \
-    src/kernel/debug.c \
-    src/kernel/timer.c \
-    src/mm/pmm.c \
-    src/mm/vmm.c \
-    src/mm/heap.c \
-    src/lib/string.c \
-    src/lib/kprintf.c \
-    src/drivers/vga.c \
-    src/drivers/serial.c \
-    src/fs/vfs.c \
-    src/fs/ramfs.c \
-    src/fs/blkdev.c \
-    src/fs/fat.c \
-    src/fs/fstab.c \
-    src/drivers/ata.c \
-    src/kernel/pipe.c
-  S_SOURCES := \
-    src/boot/boot.s \
-    src/kernel/gdt_flush.s \
-    src/kernel/tss_flush.s \
-    src/kernel/idt_flush.s \
-    src/kernel/isr_stub.s \
-    src/kernel/usermode.s
-endif
-
 C_OBJECTS = $(patsubst src/%.c, build/%.o, $(C_SOURCES))
 S_OBJECTS = $(patsubst src/%.s, build/%.o, $(S_SOURCES))
 OBJECTS   = $(C_OBJECTS) $(S_OBJECTS)
@@ -387,18 +340,13 @@ debug: iso-ready
 	qemu-system-x86_64 -cdrom $(ISO) -nographic -m 128M \
 		-d int,cpu_reset -no-reboot -no-shutdown
 
-# run-gdb: boot the ISO with the kernel's gdb stub exposed on COM2
-# as tcp::1234. Connect from another shell with:
-#   i686-elf-gdb build/lighthos.bin -ex 'target remote localhost:1234'
-# The kernel drops into the stub on any int3 (kernel or user).
-# Insert breakpoints by adding `gdb_break();` in kernel source or via
-# gdb's `break *0xADDR` (software int3 patched at runtime).
+# run-gdb uses QEMU's own -s -S gdbstub. Attach from another shell:
+#   x86_64-elf-gdb build/lighthos.bin -ex 'target remote :1234'
+# The kernel gdbstub.c was i386-only and got dropped in the port;
+# QEMU's built-in stub is more than adequate for debugging.
 run-gdb: iso-ready $(DISK_IMG)
 	qemu-system-x86_64 -cdrom $(ISO) -drive file=$(DISK_IMG),format=raw,if=ide \
-		-m 128M -nographic \
-		-serial mon:stdio \
-		-serial tcp::1234,server,nowait \
-		-no-reboot
+		-m 128M -nographic -s -S -no-reboot
 
 iso-ready:
 	@if [ ! -f $(ISO) ]; then \
