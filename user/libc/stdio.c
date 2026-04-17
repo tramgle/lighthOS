@@ -388,35 +388,13 @@ FILE *popen(const char *cmd, const char *mode) {
     int read_mode = (mode[0] == 'r');
     if (!read_mode && mode[0] != 'w') return 0;
 
-    /* Tokenize cmd into argv. */
-    #define POPEN_ARGC 16
-    static char buf[256];
-    static char *argv[POPEN_ARGC + 1];
+    /* Run through /bin/shell -c so pipes, redirection, globs, $VAR,
+       and quoting behave the way callers expect. */
+    static char cmdbuf[512];
     size_t n = 0;
-    while (cmd[n] && n < sizeof(buf) - 1) { buf[n] = cmd[n]; n++; }
-    buf[n] = 0;
-    int argc = 0; size_t i = 0;
-    while (i < n && argc < POPEN_ARGC) {
-        while (i < n && (buf[i] == ' ' || buf[i] == '\t')) i++;
-        if (i >= n) break;
-        argv[argc++] = &buf[i];
-        while (i < n && buf[i] != ' ' && buf[i] != '\t') i++;
-        if (i < n) { buf[i++] = 0; }
-    }
-    argv[argc] = 0;
-    if (argc == 0) return 0;
-
-    char path[128];
-    if (argv[0][0] == '/') {
-        size_t l = 0; while (argv[0][l] && l < sizeof(path) - 1) { path[l] = argv[0][l]; l++; }
-        path[l] = 0;
-    } else {
-        const char *bin = "/bin/"; size_t l = 0;
-        while (bin[l]) { path[l] = bin[l]; l++; }
-        size_t k = 0;
-        while (argv[0][k] && l < sizeof(path) - 1) { path[l++] = argv[0][k++]; }
-        path[l] = 0;
-    }
+    while (cmd[n] && n < sizeof(cmdbuf) - 1) { cmdbuf[n] = cmd[n]; n++; }
+    cmdbuf[n] = 0;
+    char *argv[] = { (char *)"shell", (char *)"-c", cmdbuf, 0 };
 
     int pipefd[2];
     if (sys_pipe(pipefd) < 0) return 0;
@@ -432,7 +410,7 @@ FILE *popen(const char *cmd, const char *mode) {
         } else {
             sys_close(pipefd[1]); sys_dup2(pipefd[0], 0); sys_close(pipefd[0]);
         }
-        sys_execve(path, argv, 0);
+        sys_execve("/bin/shell", argv, 0);
         sys_exit(127);
     }
 

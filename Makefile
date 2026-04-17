@@ -628,6 +628,7 @@ docker-test:
 # host harness greps for, and calls sys_shutdown.
 
 TEST_VSH = $(wildcard tests/*.vsh)
+TEST_LUA = $(wildcard tests/*.lua)
 
 build/lighthos-test.iso: $(KERNEL_BIN) grub-test.cfg x64-userland \
                          $(X64_USER_EXTRA) \
@@ -636,7 +637,8 @@ build/lighthos-test.iso: $(KERNEL_BIN) grub-test.cfg x64-userland \
                          build/sysroot/usr/lib/libvibc.so.1 \
                          build/sysroot/usr/lib/ld-lighthos.so.1 \
                          build/sysroot/usr/lib/luamod.so \
-                         $(TEST_VSH)
+                         tests/lua/testlib.lua \
+                         $(TEST_VSH) $(TEST_LUA)
 	@rm -rf build/iso-test/boot
 	@mkdir -p build/iso-test/boot/grub build/iso-test/boot/tests build/iso-test/boot/lib
 	cp $(KERNEL_BIN) build/iso-test/boot/lighthos.bin
@@ -652,7 +654,9 @@ build/lighthos-test.iso: $(KERNEL_BIN) grub-test.cfg x64-userland \
 	cp build/sysroot/usr/lib/libvibc.so.1   build/iso-test/boot/lib/libvibc.so.1
 	cp build/sysroot/usr/lib/ld-lighthos.so.1 build/iso-test/boot/lib/ld-lighthos.so.1
 	cp build/sysroot/usr/lib/luamod.so       build/iso-test/boot/lib/luamod.so
+	cp tests/lua/testlib.lua                 build/iso-test/boot/lib/testlib.lua
 	@for f in $(TEST_VSH); do cp $$f build/iso-test/boot/tests/; done
+	@for f in $(TEST_LUA); do cp $$f build/iso-test/boot/tests/; done
 	grub-mkrescue -o $@ build/iso-test 2>/dev/null
 
 test-iso: build/lighthos-test.iso

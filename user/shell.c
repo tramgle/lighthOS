@@ -823,7 +823,18 @@ static int run_interactive(void) {
 }
 
 int main(int argc, char **argv, char **envp) {
-    (void)envp; (void)argv;
+    (void)envp;
+    if (argc >= 3 && u_strcmp(argv[1], "-c") == 0) {
+        /* One-shot: run the string as a single shell line. Used by
+           libvibc's system() / popen() so callers get shell globbing
+           and redirection (>, >>, <, |, &) instead of having their
+           tokens handed straight to execve. */
+        char line[LINE_MAX];
+        int i = 0;
+        while (argv[2][i] && i < LINE_MAX - 1) { line[i] = argv[2][i]; i++; }
+        line[i] = 0;
+        return run_line(line);
+    }
     if (argc >= 2) return run_script(argv[1]);
     return run_interactive();
 }
