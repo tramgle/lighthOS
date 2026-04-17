@@ -97,6 +97,7 @@ X64_USER        = hello forktest fstest \
                   echo cat wc head tail grep cp mv touch ls sleep mkdir \
                   mount umount chroot mmaptest env envtest \
                   sigtest alarmtest strace \
+                  dynhello dyn_echo \
                   test_pid test_fork test_fs test_stream
 # Simple single-source user targets built via the pattern rule below.
 X64_USER_TARGETS = $(addprefix $(BUILD_USER)/,$(X64_USER))
