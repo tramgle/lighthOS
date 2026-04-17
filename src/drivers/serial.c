@@ -11,6 +11,17 @@ static char serial_buffer[SERIAL_BUF_SIZE];
 static volatile uint32_t serial_read_idx;
 static volatile uint32_t serial_write_idx;
 static uint32_t line_len;       /* chars on the current input line */
+static int serial_raw_mode;     /* 1 = caller does its own echo + line editing */
+
+void serial_set_raw(int enable) {
+    serial_raw_mode = enable ? 1 : 0;
+    /* Force line accounting back to zero on the transition. Any
+       caller flipping modes mid-input probably doesn't want the
+       kernel counter to leak across. */
+    line_len = 0;
+}
+
+int serial_get_raw(void) { return serial_raw_mode; }
 
 static int serial_is_transmit_empty(void) {
     return inb(SERIAL_COM1 + 5) & 0x20;
@@ -127,11 +138,17 @@ static registers_t *serial_callback(registers_t *regs) {
         if (c == '\r') c = '\n';
         if (c == 0x7F) c = '\b';
 
-        /* Line-discipline-lite: track how many bytes are live on the
-           current line so backspace can't chew into the prompt.
-           line_len counts chars typed since the last newline; a
-           backspace at the start is swallowed (no buffer push, no
-           visible rub-out). Reset on newline. */
+        /* Raw mode: user space handles echo + line editing. Pass the
+           byte through verbatim (including '\b'), no kernel mirror. */
+        if (serial_raw_mode) {
+            serial_enqueue(c);
+            continue;
+        }
+
+        /* Cooked mode: line-discipline-lite. Track how many bytes are
+           live on the current line so backspace can't chew into the
+           prompt. line_len counts chars typed since the last newline;
+           a backspace at the start is swallowed. Reset on newline. */
         if (c == '\b') {
             if (line_len == 0) continue;
             line_len--;

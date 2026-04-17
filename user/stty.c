@@ -1,15 +1,14 @@
-/* stty size — report the terminal's row/col dimensions.
+/* stty — small terminal-control shim.
  *
- * POSIX would do this via ioctl(TIOCGWINSZ) against a tty driver.
- * We don't have a tty subsystem, so we use the VT100 trick: move
- * the cursor to an absurd position (999;999), the terminal clamps
- * it to its actual bounds, then ESC[6n asks the terminal to report
- * the position — it replies ESC[row;colR over stdin.
+ *   stty size         — report rows cols
+ *   stty raw          — enable kernel raw mode (no echo, no BS magic)
+ *   stty cooked       — restore default cooked-mode line discipline
  *
- * Caveats: the kernel's serial line-discipline will echo the
- * digits and 'R' of the reply back at the terminal, producing a
- * brief visible glitch. For a clean probe we'd need a raw-mode
- * flag on the serial driver, which is a separate project. */
+ * `size` uses the VT100 trick: move the cursor to an absurd position
+ * (999;999), the terminal clamps, then ESC[6n asks for the position.
+ * The reply comes back over stdin as ESC[row;colR. We flip raw mode
+ * on for the duration of the probe so the reply bytes don't get
+ * echoed back to the terminal. */
 
 #include "ulib_x64.h"
 
@@ -36,13 +35,24 @@ static int read_reply(int *rows, int *cols) {
 
 int main(int argc, char **argv, char **envp) {
     (void)envp;
+    if (argc >= 2 && u_strcmp(argv[1], "raw") == 0) {
+        sys_tty_raw(1);
+        return 0;
+    }
+    if (argc >= 2 && u_strcmp(argv[1], "cooked") == 0) {
+        sys_tty_raw(0);
+        return 0;
+    }
     int want_size = (argc >= 2 && argv[1][0] == 's' && argv[1][1] == 'i');
 
-    /* Save cursor, drive it to the bottom-right, request pos, restore. */
+    /* Probe in raw mode so the terminal's reply doesn't echo back. */
+    sys_tty_raw(1);
     u_puts_n("\033[s\033[999;999H\033[6n\033[u");
 
     int rows = 0, cols = 0;
-    if (read_reply(&rows, &cols) != 0) {
+    int rc = read_reply(&rows, &cols);
+    sys_tty_raw(0);
+    if (rc != 0) {
         u_puts_n("stty: no reply (terminal doesn't support CSI 6n?)\n");
         return 1;
     }

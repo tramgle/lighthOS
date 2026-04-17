@@ -209,6 +209,7 @@ static inline long sys_getpgid(int pid) {
 #define SYS_REGIONS  211
 #define SYS_PAGEMAP  212
 #define SYS_PEEK     213
+#define SYS_TTY_RAW   54
 #define SYS_BLKDEVS  215
 #define SYS_CHDIR     12
 #define SYS_GETCWD   183
@@ -279,6 +280,13 @@ static inline long sys_pagemap(uint64_t va, struct pagemap_out *out) {
 }
 static inline long sys_regions(uint32_t idx, struct region_out *out) {
     return _syscall2(SYS_REGIONS, (long)idx, (long)(uintptr_t)out);
+}
+/* Toggle the kernel's cooked-mode serial line discipline.
+   0 = default cooked mode (kernel echoes + handles BS).
+   1 = raw mode (caller reads bytes verbatim; handles its own echo).
+   Ctrl-C / Ctrl-Z still route to the foreground pgid in raw mode. */
+static inline long sys_tty_raw(int enable) {
+    return _syscall1(SYS_TTY_RAW, enable);
 }
 
 static inline size_t ustrlen(const char *s) {

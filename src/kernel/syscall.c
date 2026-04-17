@@ -502,6 +502,12 @@ mmap_done:
         break;
     }
 
+    case SYS_TTY_RAW: {
+        serial_set_raw((int)a1);
+        regs->rax = 0;
+        break;
+    }
+
     case SYS_MEMINFO: {
         struct meminfo {
             uint64_t total_kb;

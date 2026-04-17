@@ -45,6 +45,7 @@
 #define SYS_TRACE_READ  232
 #define SYS_MMAP_ANON   9
 #define SYS_MPROTECT    125
+#define SYS_TTY_RAW     54   /* 0 = cooked (default), 1 = raw. */
 
 /* mmap/mprotect protection flags. PROT_EXEC is documented but not
    enforced — our paging setup has no NX bit at the i386 level. */
