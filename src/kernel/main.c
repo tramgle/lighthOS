@@ -168,6 +168,10 @@ void kernel_main(uint32_t magic, multiboot_info_t *mbi) {
                umount round-trips. */
             vfs_mkdir("/disk");
             fstab_do_mount("ata0p0", "/disk", "fat", "rw");
+            /* Synthetic /proc exposes live kernel state. Mount
+               before the boot-log flush so /boot.log still lands
+               on the rootfs rather than under /proc. */
+            fstab_do_mount("proc", "/proc", "proc", "rw");
         } else {
             /* Bootdisk flow: FAT is the root filesystem. */
             fstab_mount_defaults();

@@ -2,6 +2,7 @@
 #include "fs/vfs.h"
 #include "fs/blkdev.h"
 #include "fs/fat.h"
+#include "fs/procfs.h"
 #include "mm/heap.h"
 #include "lib/string.h"
 #include "lib/kprintf.h"
@@ -42,6 +43,24 @@ int fstab_do_mount(const char *source, const char *mountpoint,
 static int apply_entry(const char *source, const char *mountpoint,
                        const char *type, const char *flags) {
     int read_only = (strcmp(flags, "ro") == 0);
+
+    /* procfs is a synthetic fs with no backing blkdev — handle it
+       before the blkdev_get() that other fstab types need. The
+       `source` token is conventional ("proc") but unused. */
+    if (strcmp(type, "proc") == 0 || strcmp(type, "procfs") == 0) {
+        vfs_node_t *root = procfs_init();
+        if (!root) {
+            serial_printf("[fstab] %s: procfs_init failed\n", source);
+            return 0;
+        }
+        vfs_mkdir(mountpoint);
+        if (vfs_mount(mountpoint, procfs_get_ops(), root, 0) != 0) {
+            serial_printf("[fstab] procfs vfs_mount at %s failed\n", mountpoint);
+            return 0;
+        }
+        serial_printf("[fstab] mounted proc at %s\n", mountpoint);
+        return 1;
+    }
 
     blkdev_t *dev = blkdev_get(source);
     if (!dev) {
@@ -140,7 +159,8 @@ int fstab_mount_defaults(void) {
        ramfs at '/' (mounted unconditionally during VFS setup) is
        detached by vfs_mount's replace-on-collision behavior. */
     static const char *DEFAULT_FSTAB =
-        "ata0p0 / fat rw\n";
+        "ata0p0 / fat rw\n"
+        "proc /proc proc rw\n";
     serial_printf("[fstab] using built-in defaults (no /etc/fstab)\n");
     return fstab_mount_string(DEFAULT_FSTAB);
 }
