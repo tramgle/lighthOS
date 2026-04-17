@@ -19,12 +19,10 @@ typedef struct heap_block {
 #define ALIGN16(x) (((x) + 15) & ~(uint64_t)15)
 
 static heap_block_t *heap_start;
-static uint64_t      heap_total;
 
 void heap_init(uint64_t start, uint64_t size) {
     start = ALIGN16(start);
     heap_start = (heap_block_t *)(uintptr_t)start;
-    heap_total = size;
     heap_start->size    = size - HEADER_SIZE;
     heap_start->is_free = true;
     heap_start->next    = 0;

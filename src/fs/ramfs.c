@@ -56,11 +56,20 @@ static int ramfs_close(vfs_node_t *node) {
     return 0;
 }
 
+/* Cap ramfs files at 4 GiB since the inode's size/capacity fields are
+ * uint32_t. A user with lseek + write could otherwise push `offset +
+ * size` past 2^32, wrap `needed`, and make memcpy scribble kernel
+ * memory. Enforce it explicitly both on read (range clamp) and on
+ * write (refuse before allocating). */
+#define RAMFS_MAX_FILE 0xFFFFFFFFu
+
 static ssize_t ramfs_read(vfs_node_t *node, void *buf, size_t size, off_t offset) {
     ramfs_inode_t *inode = (ramfs_inode_t *)node->private_data;
     if (inode->type != VFS_FILE) return -1;
-    if (offset >= inode->size) return 0;
-    if (offset + size > inode->size) size = inode->size - offset;
+    if (offset < 0) return -1;
+    if ((uint64_t)offset >= inode->size) return 0;
+    uint64_t avail = inode->size - (uint64_t)offset;
+    if (size > avail) size = (size_t)avail;
     memcpy(buf, inode->data + offset, size);
     return (ssize_t)size;
 }
@@ -68,11 +77,23 @@ static ssize_t ramfs_read(vfs_node_t *node, void *buf, size_t size, off_t offset
 static ssize_t ramfs_write(vfs_node_t *node, const void *buf, size_t size, off_t offset) {
     ramfs_inode_t *inode = (ramfs_inode_t *)node->private_data;
     if (inode->type != VFS_FILE) return -1;
+    if (offset < 0) return -1;
 
-    uint32_t needed = offset + size;
+    /* Promote to 64-bit so the range check can reject oversized
+       writes before the uint32_t truncation. RAMFS_MAX_FILE caps at
+       4 GiB - 1 to keep size/capacity representable. */
+    uint64_t end = (uint64_t)offset + (uint64_t)size;
+    if (end < (uint64_t)offset || end > RAMFS_MAX_FILE) return -1;
+    uint32_t needed = (uint32_t)end;
+
     if (needed > inode->capacity) {
-        uint32_t new_cap = needed * 2;
-        if (new_cap < 256) new_cap = 256;
+        /* Double on grow, but cap the new capacity at RAMFS_MAX_FILE
+           so a user asking for exactly the max doesn't try to
+           allocate twice that. */
+        uint64_t new_cap64 = (uint64_t)needed * 2;
+        if (new_cap64 > RAMFS_MAX_FILE) new_cap64 = RAMFS_MAX_FILE;
+        if (new_cap64 < 256) new_cap64 = 256;
+        uint32_t new_cap = (uint32_t)new_cap64;
         uint8_t *new_data = kmalloc(new_cap);
         if (!new_data) return -1;
         if (inode->data) {
@@ -84,9 +105,7 @@ static ssize_t ramfs_write(vfs_node_t *node, const void *buf, size_t size, off_t
     }
 
     memcpy(inode->data + offset, buf, size);
-    if (offset + size > inode->size) {
-        inode->size = offset + size;
-    }
+    if (needed > inode->size) inode->size = needed;
     node->size = inode->size;
     return (ssize_t)size;
 }

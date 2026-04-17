@@ -91,9 +91,15 @@ static int ata_write_sector(blkdev_t *dev, uint32_t lba, const void *buf) {
         outw(ATA_PRIMARY_DATA, wbuf[i]);
     }
 
-    /* Flush cache */
+    /* Flush cache. If the flush times out the sector was still sent
+       to the drive but may not have hit media yet — surface the
+       failure so callers (panic.log, install, etc.) can decide
+       whether to retry. */
     outb(ATA_PRIMARY_CMD, ATA_CMD_FLUSH);
-    ata_wait_bsy();
+    if (ata_wait_bsy() != 0) {
+        serial_printf("[ata] flush wait timed out at lba=%u\n", lba);
+        return -1;
+    }
     return 0;
 }
 

@@ -36,6 +36,10 @@ int elf_validate(const void *data, uint64_t size) {
     if (ehdr->e_type != ET_EXEC && ehdr->e_type != ET_DYN) return -1;
     if (ehdr->e_machine != EM_X86_64) return -1;
     if (ehdr->e_phoff == 0 || ehdr->e_phnum == 0) return -1;
+    /* Reject phdr tables whose entry size is smaller than the struct
+       we're going to read through — otherwise a crafted ELF could
+       overlap entries and bypass the per-phdr bounds checks below. */
+    if (ehdr->e_phentsize < sizeof(elf64_phdr_t)) return -1;
     uint64_t ph_end = ehdr->e_phoff + (uint64_t)ehdr->e_phnum * ehdr->e_phentsize;
     if (ph_end < ehdr->e_phoff) return -1;
     if (ph_end > size) return -1;
