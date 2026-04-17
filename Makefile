@@ -61,7 +61,7 @@ X64_USER_PROD   = hello shell bomb find rm stty \
                   mount umount chroot env \
                   strace pkill time \
                   hexdump pagemap regions \
-                  flappy
+                  flappy ui_example
 X64_USER        = $(X64_USER_PROD) $(X64_USER_TEST)
 # Binaries that need libvibc (stdio.h, printf, string.h) get their
 # own linker rules below — not added to X64_USER so the generic

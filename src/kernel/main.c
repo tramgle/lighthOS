@@ -29,6 +29,7 @@
 #include "drivers/vga.h"
 #include "drivers/serial.h"
 #include "drivers/keyboard.h"
+#include "drivers/mouse.h"
 #include "drivers/console.h"
 #include "drivers/ata.h"
 #include "fs/vfs.h"
@@ -138,6 +139,7 @@ void kernel_main(uint32_t magic, multiboot_info_t *mbi) {
     timer_init(100);
     serial_init_irq();
     keyboard_init();
+    mouse_init();
     syscall_init();
 
     task_init();

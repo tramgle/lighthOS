@@ -236,6 +236,13 @@ static inline long sys_getpgid(int pid) {
 #define SYS_TTY_LASTSRC 62
 #define SYS_PAUSE       64
 #define SYS_ISATTY      65
+#define SYS_MOUSE_POLL  66
+
+struct mouse_state {
+    int32_t  x;
+    int32_t  y;
+    uint32_t buttons;   /* bit 0 = L, 1 = R, 2 = M */
+};
 #define SYS_BLKDEVS  215
 #define SYS_CHDIR     12
 #define SYS_GETCWD   183
@@ -355,6 +362,13 @@ static inline long sys_tty_lastsrc(void) { return _syscall0(SYS_TTY_LASTSRC); }
 static inline long sys_pause(void) { return _syscall0(SYS_PAUSE); }
 /* 1 if fd is the console; 0 for pipes, files, closed fds, bad fd. */
 static inline long sys_isatty(int fd) { return _syscall1(SYS_ISATTY, fd); }
+/* Non-blocking read of the PS/2 mouse state. Returns 0 on success,
+ * -1 if the pointer is bad. The cursor position is kernel-maintained
+ * and clamped to the last sys_vga_gfx extent, so polling is safe
+ * even between frames. */
+static inline long sys_mouse_poll(struct mouse_state *out) {
+    return _syscall1(SYS_MOUSE_POLL, (long)(uintptr_t)out);
+}
 
 static inline size_t ustrlen(const char *s) {
     size_t n = 0; while (s[n]) n++; return n;

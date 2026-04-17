@@ -20,6 +20,7 @@
 #include "drivers/serial.h"
 #include "drivers/vga.h"
 #include "drivers/keyboard.h"
+#include "drivers/mouse.h"
 #include "drivers/console.h"
 
 /* Thin wrappers so the SYS_EXECVE case body reads cleanly even
@@ -546,6 +547,23 @@ mmap_done:
         regs->rax = (uint64_t)console_last_input_src();
         break;
 
+    case SYS_MOUSE_POLL: {
+        struct mouse_state_k {
+            int32_t  x;
+            int32_t  y;
+            uint32_t buttons;
+        } *out = (struct mouse_state_k *)(uintptr_t)a1;
+        if (!out) { regs->rax = (uint64_t)(int64_t)-1; break; }
+        int32_t x, y;
+        uint32_t buttons;
+        mouse_get_state(&x, &y, &buttons);
+        out->x = x;
+        out->y = y;
+        out->buttons = buttons;
+        regs->rax = 0;
+        break;
+    }
+
     case SYS_ISATTY: {
         /* Return 1 iff `a1` is an open fd on the console (keyboard +
            VGA / COM1 line discipline). Used by /bin/ls to decide
@@ -593,6 +611,12 @@ mmap_done:
                        VMM_FLAG_PRESENT | VMM_FLAG_WRITE | VMM_FLAG_USER);
         }
         vga_mode13_enter();
+        /* Keep the mouse cursor inside the visible framebuffer so it
+           doesn't wander off into unused clamp space while the user
+           program redraws. Text mode's 80x25 doesn't need this —
+           user programs that care about the cursor in text mode
+           would manage their own coordinates. */
+        mouse_set_extent(320, 200);
         regs->rax = user_va;
         break;
     }
