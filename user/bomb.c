@@ -32,13 +32,21 @@ int main(int argc, char **argv, char **envp) {
     u_puts_n(" hold="); u_putdec(hold_secs); u_putc('\n');
 
     int gen = max_gen;
+    int fails = 0;
     while (gen != 0) {
         int c = sys_fork();
         if (c < 0) {
-            /* Out of slots/memory — back off and retry. */
+            /* Out of slots — back off a few times, then give up so
+               we don't spin forever against a saturated table. */
+            if (++fails >= 64) {
+                u_puts_n("[bomb] fork limit hit; stopping at gen=");
+                u_putdec(gen); u_putc('\n');
+                break;
+            }
             sys_yield();
             continue;
         }
+        fails = 0;
         if (gen > 0) gen--;
     }
 

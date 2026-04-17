@@ -203,7 +203,10 @@ static int run_pipeline(struct stage *stages, int nstages,
             u_puts_n("shell: not found: "); u_puts_n(path); u_putc('\n');
             sys_exit(127);
         }
-        if (pid < 0) return 1;
+        if (pid < 0) {
+            u_puts_n("shell: fork failed (process table full?)\n");
+            return 1;
+        }
         /* Parent also calls setpgid to close the race (child may not
            have run yet). First stage: pid is the leader. */
         if (i == 0) pgid_leader = (int)pid;

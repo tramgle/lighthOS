@@ -6,7 +6,7 @@
 #include "kernel/isr.h"
 #include "fs/vfs.h"
 
-#define PROCESS_MAX      8
+#define PROCESS_MAX      64
 #define FD_MAX           16
 #define PROCESS_NAME_MAX 32
 #define NSIG             32
