@@ -93,6 +93,8 @@ static const char *resolve_path(const char *user_path) {
 #define SYS_DUP2     63
 #define SYS_FORK     57
 #define SYS_SIGRETURN 119
+#define SYS_SETPGID  109
+#define SYS_GETPGID  108
 #define SYS_CHROOT  161
 #define SYS_MPROTECT 125
 #define SYS_EXECVE  59
@@ -304,7 +306,15 @@ mmap_done:
     }
 
     case SYS_KILL:
-        regs->rax = (uint64_t)(int64_t)process_kill((uint32_t)a1, (int)a2);
+        regs->rax = (uint64_t)(int64_t)process_kill((int32_t)a1, (int)a2);
+        break;
+
+    case SYS_SETPGID:
+        regs->rax = (uint64_t)(int64_t)process_setpgid((uint32_t)a1, (uint32_t)a2);
+        break;
+
+    case SYS_GETPGID:
+        regs->rax = process_getpgid((uint32_t)a1);
         break;
 
     case SYS_SIGNAL:

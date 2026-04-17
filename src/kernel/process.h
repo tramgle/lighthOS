@@ -47,6 +47,7 @@ typedef struct {
 typedef struct process {
     uint32_t    pid;
     uint32_t    parent_pid;
+    uint32_t    pgid;           /* process group — defaults to pid */
     char        name[PROCESS_NAME_MAX];
     task_t     *task;
     fd_entry_t  fds[FD_MAX];
@@ -99,11 +100,18 @@ int     fd_pipe(int fds[2]);
 
 /* Signal plumbing. */
 int64_t process_signal(int signo, uint64_t handler);
-int     process_kill(uint32_t pid, int signo);
+int     process_kill(int32_t pid, int signo);   /* pid<0 kills pgid=-pid */
 void    process_tick_alarms(void);
 uint32_t process_set_alarm(uint32_t secs);
 void    process_sigreturn(registers_t *regs);
 void    process_deliver_pending_signals(registers_t *regs);
+
+/* Process-group / foreground tracking. setpgid(pid,pgid): 0 for
+   either means "caller's pid". getpgid(pid): 0 means caller. */
+int      process_setpgid(uint32_t pid, uint32_t pgid);
+uint32_t process_getpgid(uint32_t pid);
+uint32_t process_get_foreground(void);
+void     process_set_foreground(uint32_t pgid);
 ssize_t fd_read(int fd, void *buf, size_t n);
 ssize_t fd_write(int fd, const void *buf, size_t n);
 off_t   fd_lseek(int fd, off_t off, int whence);

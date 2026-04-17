@@ -40,6 +40,8 @@
 #define SYS_DUP2      63
 #define SYS_FORK      57
 #define SYS_SIGRETURN 119
+#define SYS_SETPGID  109
+#define SYS_GETPGID  108
 #define SYS_CHROOT   161
 #define SYS_MPROTECT 125
 
@@ -194,6 +196,12 @@ static inline long sys_alarm(unsigned secs) {
 static inline void sys_sigreturn(void) {
     _syscall0(SYS_SIGRETURN);
     __builtin_unreachable();
+}
+static inline long sys_setpgid(int pid, int pgid) {
+    return _syscall2(SYS_SETPGID, pid, pgid);
+}
+static inline long sys_getpgid(int pid) {
+    return _syscall1(SYS_GETPGID, pid);
 }
 
 static inline size_t ustrlen(const char *s) {

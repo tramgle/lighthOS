@@ -43,10 +43,52 @@ void process_init(void) {
 
 /* Drivers (serial.c) reach into process state for Ctrl-C / Ctrl-Z
    routing. Weak stubs until the foreground-pgid layer is re-ported. */
-void process_kill_foreground(void) __attribute__((weak));
-void process_kill_foreground(void) { }
-void process_stop_foreground(void) __attribute__((weak));
-void process_stop_foreground(void) { }
+/* foreground_pgid is the group that currently owns the terminal.
+   Serial-driver Ctrl-C / Ctrl-Z routes signals to this group. */
+static uint32_t g_foreground_pgid;
+
+uint32_t process_get_foreground(void) { return g_foreground_pgid; }
+void     process_set_foreground(uint32_t pgid) { g_foreground_pgid = pgid; }
+
+static void signal_group(uint32_t pgid, int signo) {
+    if (pgid == 0) return;
+    for (int i = 0; i < PROCESS_MAX; i++) {
+        process_t *p = &processes[i];
+        if (!p->alive) continue;
+        if (p->pgid != pgid) continue;
+        if (p->pid == 0) continue;
+        if (signo == SIG_KILL) {
+            p->alive = false;
+            if (p->task) p->task->state = TASK_DEAD;
+            continue;
+        }
+        if (signo == SIG_STOP) {
+            if (p->task) p->task->state = TASK_STOPPED;
+            continue;
+        }
+        if (signo == SIG_CONT) {
+            if (p->task && p->task->state == TASK_STOPPED) p->task->state = TASK_READY;
+            continue;
+        }
+        p->sig_pending |= (1u << signo);
+    }
+}
+
+void process_kill_foreground(void) { signal_group(g_foreground_pgid, SIG_INT); }
+void process_stop_foreground(void) { signal_group(g_foreground_pgid, SIG_STOP); }
+
+int process_setpgid(uint32_t pid, uint32_t pgid) {
+    process_t *p = pid ? process_get(pid) : process_current();
+    if (!p) return -1;
+    if (pgid == 0) pgid = p->pid;
+    p->pgid = pgid;
+    return 0;
+}
+
+uint32_t process_getpgid(uint32_t pid) {
+    process_t *p = pid ? process_get(pid) : process_current();
+    return p ? p->pgid : 0;
+}
 
 process_t *process_current(void) {
     task_t *t = task_current();
@@ -83,6 +125,7 @@ process_t *process_alloc(const char *name) {
             /* Default root = "/", cwd = "/" — inherited via fork. */
             p->root[0] = '/'; p->root[1] = 0;
             p->cwd[0] = '/';  p->cwd[1] = 0;
+            p->pgid = p->pid;
             return p;
         }
     }
@@ -439,6 +482,7 @@ int process_fork(registers_t *parent_regs) {
     process_t *child = process_alloc(parent->name);
     if (!child) return -1;
     child->parent_pid = parent->pid;
+    child->pgid = parent->pgid;     /* inherit group until setpgid */
     /* Inherit chroot + cwd. */
     for (int i = 0; i < VFS_MAX_PATH; i++) child->root[i] = parent->root[i];
     for (int i = 0; i < VFS_MAX_PATH; i++) child->cwd[i]  = parent->cwd[i];
@@ -760,13 +804,27 @@ int64_t process_signal(int signo, uint64_t handler) {
     return (int64_t)prev;
 }
 
-int process_kill(uint32_t pid, int signo) {
-    process_t *target = process_get(pid);
-    if (!target) return -1;
+int process_kill(int32_t pid, int signo) {
     if (signo <= 0 || signo >= NSIG) return -1;
+    /* Negative pid = kill the process group -pid. */
+    if (pid < 0) {
+        signal_group((uint32_t)(-pid), signo);
+        return 0;
+    }
+    process_t *target = process_get((uint32_t)pid);
+    if (!target) return -1;
     if (signo == SIG_KILL) {
         target->alive = false;
         if (target->task) target->task->state = TASK_DEAD;
+        return 0;
+    }
+    if (signo == SIG_STOP) {
+        if (target->task) target->task->state = TASK_STOPPED;
+        return 0;
+    }
+    if (signo == SIG_CONT) {
+        if (target->task && target->task->state == TASK_STOPPED)
+            target->task->state = TASK_READY;
         return 0;
     }
     target->sig_pending |= (1u << signo);
