@@ -1,5 +1,15 @@
-#include "syscall.h"
-#include "ulib.h"
+/* vi: linked against libvibc for its stdio/string surface.
+   ulib_x64.h provides the raw syscall wrappers (sys_read/write,
+   etc.) that the original i386 vi used directly. */
+#include <stdio.h>
+#include <string.h>
+#include "ulib_x64.h"
+
+/* libvibc exports printf + the FILE* surface but not the
+   bare-stdout puts/putchar — define them over sys_write so the
+   original vi source (which uses both) compiles unchanged. */
+static void puts(const char *s)    { sys_write(1, s, strlen(s)); }
+static void putchar(char c)        { sys_write(1, &c, 1); }
 
 #define SCREEN_ROWS 24   /* rows 0-23 for text */
 #define SCREEN_COLS 80
@@ -155,7 +165,7 @@ static void load_file(const char *path) {
     }
 
     char buf[256];
-    int32_t n;
+    long n;
     int col = 0;
     num_lines = 1;
     lines[0][0] = '\0';

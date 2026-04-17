@@ -53,9 +53,9 @@ X64_USER        = hello forktest fstest \
                   test_pid test_fork test_fs test_stream test_pgroup test_xmm
 # Simple single-source user targets built via the pattern rule below.
 X64_USER_TARGETS = $(addprefix $(BUILD_USER)/,$(X64_USER))
-# Multi-object user targets (own build rules above): lua. Added to
-# the ISO staging list explicitly.
-X64_USER_EXTRA = $(BUILD_USER)/lua
+# User targets with their own build rules (libvibc/libulib linkage):
+# lua and vi. Added to the ISO/disk staging list explicitly.
+X64_USER_EXTRA = $(BUILD_USER)/lua $(BUILD_USER)/vi
 
 X64_USER_CFLAGS = -std=gnu99 -ffreestanding -O2 -Wall -Wextra -nostdlib \
                   -mno-red-zone -mno-sse -mno-mmx -mno-sse2 \
@@ -221,6 +221,23 @@ $(X64_USER_TARGETS): $(BUILD_USER)/%: $(BUILD_USER)/crt0.o $(BUILD_USER)/%.o
 	@mkdir -p $(dir $@)
 	x86_64-elf-ld -T user/user.ld -nostdlib -o $@ $^
 
+# vi needs stdio/string — compile with X64_LIBC_CFLAGS (which lets
+# it see libvibc's <stdio.h>/<string.h>) and link libvibc.a +
+# libulib.a statically, the same pattern lua uses.
+build/user/vi.o: user/vi.c
+	@mkdir -p $(dir $@)
+	$(CC) $(X64_LIBC_CFLAGS) -Iuser/libc/include -c $< -o $@
+
+$(BUILD_USER)/vi: $(BUILD_USER)/crt0.o $(BUILD_USER)/vi.o \
+                  build/sysroot/usr/lib/libvibc.a \
+                  build/sysroot/usr/lib/libulib.a
+	@mkdir -p $(dir $@)
+	x86_64-elf-ld -T user/user.ld -nostdlib -static \
+	    -o $@ $(BUILD_USER)/crt0.o $(BUILD_USER)/vi.o \
+	    build/sysroot/usr/lib/libvibc.a \
+	    build/sysroot/usr/lib/libulib.a \
+	    build/sysroot/usr/lib/libvibc.a
+
 # Dynamic user binaries: PT_INTERP=/lib/ld-lighthos.so.1 + DT_NEEDED
 # so the runtime linker resolves symbols at load time.
 $(BUILD_USER)/dynhello: $(BUILD_USER)/crt0.o user/dynhello.c \
@@ -261,7 +278,7 @@ $(BUILD_USER)/dlopentest: $(BUILD_USER)/crt0.o user/dlopentest.c \
 	      -Lbuild/sysroot/usr/lib -lulib -lgcc
 
 .PHONY: x64-userland
-x64-userland: $(X64_USER_TARGETS) $(BUILD_USER)/lua \
+x64-userland: $(X64_USER_TARGETS) $(BUILD_USER)/lua $(BUILD_USER)/vi \
               $(BUILD_USER)/dynhello $(BUILD_USER)/dyn_echo $(BUILD_USER)/dlopentest
 
 .PHONY: all clean iso run run-disk run-vga debug docker-build docker-run test docker-test iso-ready user-programs fix-perms docker-lua-compile bootdisk run-bootdisk docker-bootdisk docker-disk test-iso docker-test-iso test-disk docker-test-disk run-installed
@@ -291,7 +308,7 @@ $(ISO): $(KERNEL_BIN) grub.cfg x64-userland \
 	@# Stage each ported user binary into the ISO so grub.cfg's
 	@# `module /boot/<name> /bin/<name>` lines can drop them into
 	@# ramfs at the declared paths.
-	@for f in $(X64_USER_TARGETS) $(BUILD_USER)/dynhello \
+	@for f in $(X64_USER_TARGETS) $(X64_USER_EXTRA) $(BUILD_USER)/dynhello \
 	          $(BUILD_USER)/dyn_echo $(BUILD_USER)/dlopentest; do \
 	    name=$$(basename $$f); \
 	    if [ -x $$f ]; then cp $$f build/iso/boot/$$name; fi; \
