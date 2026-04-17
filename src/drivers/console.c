@@ -40,6 +40,11 @@ static int ansi_params[ANSI_PARAM_MAX];
 static int ansi_param_count;
 static int ansi_cur_param;
 
+/* ESC[s / ESC[u — save / restore cursor. stty's CSI-6n probe and vi's
+   status-line updates both rely on this pair; without it the cursor
+   gets left wherever the probe parked it. */
+static int saved_row, saved_col;
+
 static void ansi_reset(void) {
     ansi = ANSI_NORMAL;
     ansi_param_count = 0;
@@ -113,6 +118,20 @@ static void ansi_execute(char cmd) {
         vga_set_cursor(row, col);
         break;
     }
+    case 's': { /* Save cursor */
+        vga_get_cursor(&saved_row, &saved_col);
+        break;
+    }
+    case 'u': { /* Restore cursor */
+        vga_set_cursor(saved_row, saved_col);
+        break;
+    }
+    case 'n':
+        /* CSI-6n device status report. A real terminal answers with
+           ESC[row;colR; VGA has no way to shove bytes back into the
+           input stream, so we just drop it. Callers that want the
+           live dimensions either read serial or use SYS_TTY_WINSZ. */
+        break;
     default:
         break;
     }

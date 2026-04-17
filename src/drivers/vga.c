@@ -88,6 +88,16 @@ void vga_putchar(char c) {
         }
     } else if (c == '\r') {
         vga_col = 0;
+    } else if (c == '\b') {
+        /* Cursor-left only. Our shell's raw-mode line editor sends
+           \b both for navigation and as the first of a "\b \b"
+           rub-out triple — in both cases the intent is "move one
+           left", not "write a glyph". Match vga_backspace without
+           erasing, since the rub-out's space will do that. */
+        if (vga_col > 0) vga_col--;
+        else if (vga_row > 0) { vga_row--; vga_col = VGA_WIDTH - 1; }
+    } else if ((unsigned char)c < 0x20 || (unsigned char)c == 0x7F) {
+        /* Drop other C0 controls + DEL so they don't splatter glyphs. */
     } else {
         vga_buffer[vga_row * VGA_WIDTH + vga_col] =
             vga_entry(c, vga_color_attr);
