@@ -65,10 +65,12 @@ static void signal_group(uint32_t pgid, int signo) {
         }
         if (signo == SIG_STOP) {
             if (p->task) p->task->state = TASK_STOPPED;
+            p->stopped_reported = false;
             continue;
         }
         if (signo == SIG_CONT) {
             if (p->task && p->task->state == TASK_STOPPED) p->task->state = TASK_READY;
+            p->stopped_reported = false;
             continue;
         }
         p->sig_pending |= (1u << signo);
@@ -416,6 +418,16 @@ int process_waitpid(uint32_t pid, int *status) {
         if (!p->alive) {
             if (status) *status = p->exit_code;
             p->reaped = true;
+            return (int)pid;
+        }
+        /* Report stops once, so the parent can pick up a Ctrl-Z'd
+           pipeline and move on. POSIX encoding: low byte 0x7f +
+           signal in the high byte. SIG_CONT clears stopped_reported
+           so a later stop re-reports. */
+        if (p->task && p->task->state == TASK_STOPPED &&
+            !p->stopped_reported) {
+            p->stopped_reported = true;
+            if (status) *status = 0x7F | (SIG_STOP << 8);
             return (int)pid;
         }
         task_yield();
@@ -846,11 +858,13 @@ int process_kill(int32_t pid, int signo) {
     }
     if (signo == SIG_STOP) {
         if (target->task) target->task->state = TASK_STOPPED;
+        target->stopped_reported = false;
         return 0;
     }
     if (signo == SIG_CONT) {
         if (target->task && target->task->state == TASK_STOPPED)
             target->task->state = TASK_READY;
+        target->stopped_reported = false;
         return 0;
     }
     target->sig_pending |= (1u << signo);

@@ -55,6 +55,7 @@ typedef struct process {
     int         exit_code;
     bool        alive;
     bool        reaped;
+    bool        stopped_reported;   /* waitpid has returned the stop to parent */
     /* Chroot root (host-absolute; "/" = no chroot) and cwd
        (chroot-local, starts at "/"). process_resolve_path
        prepends root before handing a path to the VFS. */

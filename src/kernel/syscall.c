@@ -508,6 +508,15 @@ mmap_done:
         break;
     }
 
+    case SYS_TCSETPGRP: {
+        /* No ownership checks — we don't track a controlling tty per
+           process. The shell uses this to hand the terminal to
+           foreground pipelines and reclaim it on exit. */
+        process_set_foreground((uint32_t)a1);
+        regs->rax = 0;
+        break;
+    }
+
     case SYS_MEMINFO: {
         struct meminfo {
             uint64_t total_kb;

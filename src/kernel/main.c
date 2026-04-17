@@ -212,6 +212,13 @@ void kernel_main(uint32_t magic, multiboot_info_t *mbi) {
     if (pid < 0) { kprintf("spawn failed; no init found\n"); goto halt; }
     kprintf("[main] spawned pid %d\n", pid);
 
+    /* Make init the initial terminal-foreground process group. Without
+       this, the kernel's Ctrl-C / Ctrl-Z ISR paths have nothing to
+       signal (g_foreground_pgid == 0 is a sentinel for "nobody") and
+       both sequences silently no-op. Later, userland can hand off via
+       SYS_TCSETPGRP when it spawns a foreground child. */
+    process_set_foreground((uint32_t)pid);
+
     /* Dump everything kprintf'd since boot to /boot.log so the user
        has a record of driver init + mounts after init takes over the
        console. kprintf keeps buffering after this point, so later

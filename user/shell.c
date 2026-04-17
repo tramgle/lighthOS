@@ -146,6 +146,11 @@ static int run_pipeline(struct stage *stages, int nstages,
     int prev_read = -1;
     int pids[MAX_STAGES];
     int npids = 0;
+    /* Every foreground pipeline runs in a fresh process group so
+       Ctrl-C / Ctrl-Z delivered to the terminal's fg pgid hit the
+       pipeline (not the shell). The first stage becomes the pgid
+       leader; later stages join it. */
+    int pgid_leader = 0;
 
     for (int i = 0; i < nstages; i++) {
         int pfds[2] = {-1, -1};
@@ -156,6 +161,10 @@ static int run_pipeline(struct stage *stages, int nstages,
 
         long pid = sys_fork();
         if (pid == 0) {
+            /* Child: join the pipeline's pgid. For the first stage
+               pgid_leader is 0 → setpgid(0,0) makes it its own group
+               leader. Later stages setpgid(0, pgid_leader). */
+            sys_setpgid(0, pgid_leader);
             if (prev_read >= 0) {
                 sys_dup2(prev_read, 0);
                 sys_close(prev_read);
@@ -172,6 +181,9 @@ static int run_pipeline(struct stage *stages, int nstages,
                 sys_dup2(ofd, 1);
                 if (ofd != 1) sys_close(ofd);
             }
+            /* Foreground children get default SIG_INT back — shell
+               has it ignored; children shouldn't inherit that. */
+            if (!background) sys_signal(SIG_INT, SIG_DFL);
             char path[128];
             resolve_path(stages[i].argv[0], path, sizeof(path));
             sys_execve(path, stages[i].argv, 0);
@@ -179,6 +191,10 @@ static int run_pipeline(struct stage *stages, int nstages,
             sys_exit(127);
         }
         if (pid < 0) return 1;
+        /* Parent also calls setpgid to close the race (child may not
+           have run yet). First stage: pid is the leader. */
+        if (i == 0) pgid_leader = (int)pid;
+        sys_setpgid((int)pid, pgid_leader);
         if (prev_read >= 0) sys_close(prev_read);
         if (!is_last) { sys_close(pfds[1]); prev_read = pfds[0]; }
         else          prev_read = -1;
@@ -190,11 +206,34 @@ static int run_pipeline(struct stage *stages, int nstages,
         job_add(pids[npids - 1], raw_line);
         return 0;
     }
+    /* Foreground: hand the terminal to the pipeline for the duration
+       of the wait. Reclaim it on exit so the next prompt gets our
+       signals again. */
+    sys_tcsetpgrp(pgid_leader);
     int last_status = 0;
+    int stopped = 0;
     for (int i = 0; i < npids; i++) {
         int st = 0;
         sys_waitpid(pids[i], &st);
+        /* POSIX stop-status encoding: low byte 0x7f. If the first
+           stage we were waiting on got Ctrl-Z'd, stop waiting for
+           the rest of the pipeline — they'll either follow it down
+           or we'll pick them up later via fg/bg. */
+        if ((st & 0xFF) == 0x7F) {
+            stopped = 1;
+            last_status = st;
+            break;
+        }
         if (i == npids - 1) last_status = st;
+    }
+    sys_tcsetpgrp((int)sys_getpid());
+    if (stopped) {
+        /* Register the pipeline leader as a job so fg/bg can find
+           it. Print a newline + status so the next prompt lands on
+           a fresh line (the ^Z byte we swallowed in the kernel
+           never echoed). */
+        job_add(pids[0], raw_line);
+        u_puts_n("\n[stopped] "); u_puts_n(raw_line); u_putc('\n');
     }
     return last_status;
 }
@@ -538,6 +577,14 @@ static int expand_vars(const char *in, char *out, int cap) {
 }
 
 static int run_interactive(void) {
+    /* Put the shell in its own process group and claim the terminal.
+       Foreground pipelines will get handed their own pgid and reclaim
+       it on exit. Ignore SIGINT/SIGTSTP (we model TSTP as STOP — not
+       catchable anyway) so that if a Ctrl-C / Ctrl-Z arrives between
+       the hand-off calls, the shell survives. */
+    sys_setpgid(0, 0);
+    sys_tcsetpgrp((int)sys_getpid());
+    sys_signal(SIG_INT, SIG_IGN);
     char line[LINE_MAX];
     char expanded[LINE_MAX];
     for (;;) {

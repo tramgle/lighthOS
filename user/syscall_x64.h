@@ -210,6 +210,7 @@ static inline long sys_getpgid(int pid) {
 #define SYS_PAGEMAP  212
 #define SYS_PEEK     213
 #define SYS_TTY_RAW   54
+#define SYS_TCSETPGRP 55
 #define SYS_BLKDEVS  215
 #define SYS_CHDIR     12
 #define SYS_GETCWD   183
@@ -287,6 +288,11 @@ static inline long sys_regions(uint32_t idx, struct region_out *out) {
    Ctrl-C / Ctrl-Z still route to the foreground pgid in raw mode. */
 static inline long sys_tty_raw(int enable) {
     return _syscall1(SYS_TTY_RAW, enable);
+}
+/* Hand the terminal's "foreground" process group to pgid. Ctrl-C /
+   Ctrl-Z delivered by the kernel go to this group. */
+static inline long sys_tcsetpgrp(int pgid) {
+    return _syscall1(SYS_TCSETPGRP, pgid);
 }
 
 static inline size_t ustrlen(const char *s) {
