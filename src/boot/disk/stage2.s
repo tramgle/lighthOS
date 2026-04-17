@@ -206,47 +206,55 @@ pm_entry:
     mov ss, ax
     mov esp, 0x9FC00                    ; 640 KB - just under EBDA
 
-    ; Parse ELF at 0x20000 and copy PT_LOAD segments to their p_vaddr.
-    mov esi, 0x20000                    ; ESI = ELF base
+    ; Parse ELF64 at 0x20000 and copy PT_LOAD segments to their
+    ; p_paddr (the low-half LMA). Even with a higher-half VMA
+    ; (0xFFFFFFFF80000000), the link map keeps every PT_LOAD's
+    ; physical LMA below 4 GiB so 32-bit PM code can reach it.
+    ; Kernel's boot.s trampoline at _start lives in the .boot
+    ; section (LMA == VMA, low half), so e_entry's low 32 bits
+    ; point right at a 32-bit entry point we can jump to directly.
+    mov esi, 0x20000
 
-    ; Check ELF magic 0x464C457F.
+    ; ELF64 header magic.
     mov eax, [esi]
     cmp eax, 0x464C457F
     jne elf_bad
+    cmp byte [esi + 4], 2               ; ELFCLASS64
+    jne elf_bad
 
-    ; e_entry at offset 24, e_phoff at 28, e_phentsize at 42, e_phnum at 44.
+    ; e_entry @ 24 (u64, read low 32 bits — low-half phys).
     mov eax, [esi + 24]
     mov [kernel_entry], eax
 
-    mov ebx, [esi + 28]                 ; phoff
-    movzx ecx, word [esi + 44]          ; phnum
-    movzx edx, word [esi + 42]          ; phentsize
+    ; e_phoff @ 32 (u64), e_phentsize @ 54 (u16), e_phnum @ 56 (u16).
+    mov ebx, [esi + 32]
+    movzx ecx, word [esi + 56]
+    movzx edx, word [esi + 54]
 
     add ebx, esi                        ; ebx = phdr cursor
 .ph_loop:
     test ecx, ecx
     jz ph_done
 
-    ; p_type at 0
+    ; ELF64 phdr: p_type @ 0, p_offset @ 8, p_paddr @ 24,
+    ;             p_filesz @ 32, p_memsz @ 40. Use p_paddr so
+    ;             32-bit PM can actually address the dest.
     mov eax, [ebx]
     cmp eax, 1                          ; PT_LOAD
     jne .next
 
-    ; p_offset at 4, p_vaddr at 8, p_filesz at 16, p_memsz at 20
-    mov edi, [ebx + 8]                  ; dest = p_vaddr
-    mov eax, [ebx + 4]                  ; src offset
-    mov esi, [ebx + 4]
-    add esi, 0x20000                    ; src = base + p_offset
+    mov edi, [ebx + 24]                 ; dest = p_paddr (low 32)
+    mov esi, [ebx + 8]                  ; p_offset (low 32)
+    add esi, 0x20000
 
     push ecx
-    mov ecx, [ebx + 16]                 ; filesz
+    mov ecx, [ebx + 32]                 ; filesz (low 32)
     test ecx, ecx
     jz .skip_copy
     rep movsb
 .skip_copy:
-    ; Zero BSS tail: memsz - filesz bytes past the copied region.
-    mov ecx, [ebx + 20]                 ; memsz
-    sub ecx, [ebx + 16]                 ; memsz - filesz
+    mov ecx, [ebx + 40]                 ; memsz
+    sub ecx, [ebx + 32]
     xor eax, eax
     test ecx, ecx
     jz .no_bss

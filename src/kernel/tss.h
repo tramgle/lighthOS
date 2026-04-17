@@ -3,21 +3,26 @@
 
 #include "include/types.h"
 
+/* 64-bit TSS — 104 bytes, packed, no segment registers. */
 typedef struct {
-    uint32_t prev_tss;
-    uint32_t esp0;
-    uint32_t ss0;
-    uint32_t esp1, ss1;
-    uint32_t esp2, ss2;
-    uint32_t cr3, eip, eflags;
-    uint32_t eax, ecx, edx, ebx, esp, ebp, esi, edi;
-    uint32_t es, cs, ss, ds, fs, gs;
-    uint32_t ldt;
-    uint16_t trap;
+    uint32_t reserved0;
+    uint64_t rsp0;
+    uint64_t rsp1;
+    uint64_t rsp2;
+    uint64_t reserved1;
+    uint64_t ist[7];                /* IST1..IST7 */
+    uint64_t reserved2;
+    uint16_t reserved3;
     uint16_t iomap_base;
 } __attribute__((packed)) tss_entry_t;
 
-void tss_init(uint32_t kernel_ss, uint32_t kernel_esp);
-void tss_set_kernel_stack(uint32_t esp);
+/* Install the TSS, set rsp0 (stack used on CPL transition to 0),
+   point IST1 at a fault stack for #DF / #PF / #NMI, and run `ltr`. */
+void tss_init(uint64_t rsp0);
+void tss_set_kernel_stack(uint64_t rsp);
+
+/* Provided by gdt.c — installs the 16-byte TSS descriptor at
+   GDT[5..6] using the TSS base from .bss. */
+void gdt_install_tss(uint64_t base, uint32_t limit);
 
 #endif

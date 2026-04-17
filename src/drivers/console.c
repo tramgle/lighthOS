@@ -9,22 +9,63 @@ void console_init(void) {
     /* Nothing extra — keyboard, serial, VGA already initialized */
 }
 
+/* Cooked-mode line discipline state. line_len counts visible chars
+   on the current line so BS can't chew into the prompt. Reset on \n. */
+static uint32_t line_len;
+
+/* Which input ring delivered the most recent byte. Userspace reads
+   this via SYS_TTY_LASTSRC to pick between "VGA-like" (keyboard) and
+   "serial-like" (UART) behavior — e.g. flappy refuses to start if
+   nobody has touched the keyboard yet, because that's almost
+   certainly a serial-only session. 0=none, 1=serial, 2=keyboard. */
+static int last_input_src;
+int console_last_input_src(void) { return last_input_src; }
+
 ssize_t console_read(void *buf, size_t count) {
-    /* Non-blocking: returns 0 if no data is ready. Callers that need to
-       block must yield and retry (the syscall int-gate clears IF, so
-       halting here would deadlock — nothing could wake us). */
     char *cbuf = (char *)buf;
     if (count == 0) return 0;
 
-    if (keyboard_has_key()) {
-        cbuf[0] = keyboard_getchar();
+    /* Loop until we have a byte to deliver. In cooked mode we may
+       swallow a prompt-level BS and keep waiting. */
+    for (;;) {
+        /* Syscall entry clears IF (via IA32_FMASK). `sti; hlt; cli`
+           atomically re-enables interrupts just long enough for the
+           UART or keyboard IRQ to wake the halt. */
+        while (!keyboard_has_key() && !serial_has_data()) {
+            __asm__ volatile ("sti; hlt; cli");
+        }
+        char c;
+        if (keyboard_has_key()) {
+            c = keyboard_getchar();
+            last_input_src = 2;
+        } else {
+            c = serial_getchar();
+            last_input_src = 1;
+        }
+
+        /* Raw mode: pass bytes through verbatim. Shell's readline,
+           vi, and anything else driving its own cursor want this. */
+        if (serial_get_raw()) {
+            cbuf[0] = c;
+            return 1;
+        }
+
+        /* Cooked mode: echo + BS rubout + line_len guard, mirrored
+           to both serial and VGA via console_write. */
+        if (c == '\b') {
+            if (line_len == 0) continue;     /* don't eat into prompt */
+            line_len--;
+            console_write("\b \b", 3);
+        } else if (c == '\n') {
+            line_len = 0;
+            console_write("\r\n", 2);
+        } else if ((unsigned char)c >= 0x20 && (unsigned char)c < 0x7F) {
+            line_len++;
+            console_write(&c, 1);
+        }
+        cbuf[0] = c;
         return 1;
     }
-    if (serial_has_data()) {
-        cbuf[0] = serial_getchar();
-        return 1;
-    }
-    return 0;
 }
 
 /* ANSI escape sequence state machine */
@@ -39,6 +80,11 @@ static enum ansi_state ansi = ANSI_NORMAL;
 static int ansi_params[ANSI_PARAM_MAX];
 static int ansi_param_count;
 static int ansi_cur_param;
+
+/* ESC[s / ESC[u — save / restore cursor. stty's CSI-6n probe and vi's
+   status-line updates both rely on this pair; without it the cursor
+   gets left wherever the probe parked it. */
+static int saved_row, saved_col;
 
 static void ansi_reset(void) {
     ansi = ANSI_NORMAL;
@@ -113,6 +159,20 @@ static void ansi_execute(char cmd) {
         vga_set_cursor(row, col);
         break;
     }
+    case 's': { /* Save cursor */
+        vga_get_cursor(&saved_row, &saved_col);
+        break;
+    }
+    case 'u': { /* Restore cursor */
+        vga_set_cursor(saved_row, saved_col);
+        break;
+    }
+    case 'n':
+        /* CSI-6n device status report. A real terminal answers with
+           ESC[row;colR; VGA has no way to shove bytes back into the
+           input stream, so we just drop it. Callers that want the
+           live dimensions either read serial or use SYS_TTY_WINSZ. */
+        break;
     default:
         break;
     }

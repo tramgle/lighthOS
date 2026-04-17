@@ -1,17 +1,43 @@
 /* Scaled-down Lua standalone interpreter for LighthOS.
  * Supports:
- *   lua                  — interactive REPL
- *   lua <script.lua>     — run a file
- *   lua -e "stmt"        — execute a string
- * No signal handling, no readline, no -l library loading. */
+ *   lua                   — interactive REPL
+ *   lua <script.lua> [args...] — run a file (args exposed as `arg`)
+ *   lua -                 — read script from stdin
+ *   lua -e "stmt"         — execute a string
+ *   lua -i                — force REPL (after -e or a script)
+ *   lua -v                — print version + exit
+ *   lua --                — end option processing
+ * Ctrl-C during a running chunk raises a Lua error via a debug hook
+ * (ported from stock lua.c's laction); the REPL catches it and keeps
+ * going. No readline, no -l library loading. */
 
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <signal.h>
 #include "lua.h"
 #include "lauxlib.h"
 #include "lualib.h"
+
+/* See stock lua.c:lstop/laction. On SIGINT: reset the handler to
+   SIG_DFL (so a second Ctrl-C really exits), then set a one-shot
+   hook that runs on the next VM tick and raises a Lua error. That
+   bubbles up through lua_pcall to docall's caller (the REPL loop),
+   which prints "interrupted!" and re-prompts. */
+static lua_State *g_lua;
+
+static void lstop(lua_State *L, lua_Debug *ar) {
+    (void)ar;
+    lua_sethook(L, 0, 0, 0);
+    luaL_error(L, "interrupted!");
+}
+
+static void laction(int sig) {
+    int flags = LUA_MASKCALL | LUA_MASKRET | LUA_MASKCOUNT;
+    signal(sig, SIG_DFL);
+    lua_sethook(g_lua, lstop, flags, 1);
+}
 
 static void l_message(const char *pname, const char *msg) {
     if (pname) fprintf(stderr, "%s: ", pname);
@@ -44,7 +70,10 @@ static int docall(lua_State *L, int narg, int nres) {
     int base = lua_gettop(L) - narg;
     lua_pushcfunction(L, msghandler);
     lua_insert(L, base);
+    g_lua = L;
+    signal(SIGINT, laction);       /* arm Ctrl-C → lstop */
     int status = lua_pcall(L, narg, nres, base);
+    signal(SIGINT, SIG_DFL);       /* disarm outside chunk execution */
     lua_remove(L, base);
     return status;
 }
@@ -87,18 +116,18 @@ static int readline_repl(char *buf, int max, const char *prompt) {
             break;
         }
         if (c == '\n') break;
+        /* The kernel serial driver is in cooked mode: it echoes every
+           printable byte, handles backspace, and collapses \r→\n
+           before delivering bytes here. So we keep our buffer in
+           sync but emit nothing — echoing here would double-print. */
         if (c == '\b' || c == 0x7f) {
-            if (pos > 0) { pos--; fputs("\b \b", stdout); fflush(stdout); }
+            if (pos > 0) pos--;
             continue;
         }
         if (c >= ' ' && c < 127) {
             buf[pos++] = (char)c;
-            fputc(c, stdout);
-            fflush(stdout);
         }
     }
-    fputc('\n', stdout);
-    fflush(stdout);
     buf[pos] = '\0';
     return pos;
 }
@@ -177,6 +206,34 @@ static void repl(lua_State *L) {
     fputc('\n', stdout);
 }
 
+/* Expose command-line args as the `arg` table:
+     arg[0]    = script name (or program name if no script)
+     arg[1..n] = script args
+     arg[-1..] = arguments before the script (lua itself + any -e/-v). */
+static void push_arg_table(lua_State *L, int argc, char **argv,
+                           int script_idx) {
+    lua_createtable(L, argc, 0);
+    int first = (script_idx > 0) ? script_idx : argc;
+    for (int i = 0; i < argc; i++) {
+        lua_pushstring(L, argv[i]);
+        lua_rawseti(L, -2, i - first);
+    }
+    lua_setglobal(L, "arg");
+}
+
+static int dostdin(lua_State *L) {
+    /* Slurp stdin into a buffer, then load as a chunk. Bounded at
+       64 KiB — plenty for `echo 'print(1+1)' | lua -`. */
+    static char buf[64 * 1024];
+    size_t n = 0;
+    int c;
+    while (n < sizeof(buf) - 1 && (c = fgetc(stdin)) != EOF) {
+        buf[n++] = (char)c;
+    }
+    buf[n] = 0;
+    return dochunk(L, luaL_loadbuffer(L, buf, n, "=stdin"));
+}
+
 int main(int argc, char **argv) {
     lua_State *L = luaL_newstate();
     if (!L) {
@@ -185,36 +242,58 @@ int main(int argc, char **argv) {
     }
     luaL_openlibs(L);
 
-    /* Process args. */
+    /* First pass: locate the script index (or `-` for stdin) so we
+       can build the `arg` table BEFORE any -e chunks run. Standard
+       Lua: -e / -l chunks see `arg` already populated. */
     int script_idx = 0;
-    int saw_e = 0;
-    for (int i = 1; i < argc; i++) {
-        const char *a = argv[i];
-        if (strcmp(a, "-e") == 0 && i + 1 < argc) {
+    int saw_e = 0, saw_v = 0, want_interactive = 0, from_stdin = 0;
+    int args_end = argc;
+    for (int j = 1; j < argc; j++) {
+        const char *a = argv[j];
+        if (strcmp(a, "--") == 0) { args_end = j; if (j + 1 < argc) script_idx = j + 1; break; }
+        if (strcmp(a, "-") == 0)  { args_end = j; from_stdin = 1; break; }
+        if (a[0] != '-')          { args_end = j; script_idx = j; break; }
+        if (strcmp(a, "-e") == 0 && j + 1 < argc) { j++; }
+    }
+
+    push_arg_table(L, argc, argv,
+                   script_idx ? script_idx : (from_stdin ? args_end : argc));
+
+    /* Second pass: execute option chunks in order, then the script. */
+    for (int j = 1; j < args_end; j++) {
+        const char *a = argv[j];
+        if (strcmp(a, "-e") == 0 && j + 1 < argc) {
             saw_e = 1;
-            if (dostring(L, argv[++i], "=(command line)") != LUA_OK) {
+            if (dostring(L, argv[++j], "=(command line)") != LUA_OK) {
                 lua_close(L);
                 return 1;
             }
-        } else if (a[0] == '-' && a[1] != '\0') {
-            l_message("lua", "unknown option (only -e supported)");
+        } else if (strcmp(a, "-i") == 0) {
+            want_interactive = 1;
+        } else if (strcmp(a, "-v") == 0) {
+            saw_v = 1;
+            fputs("LighthOS Lua " LUA_VERSION_MAJOR "." LUA_VERSION_MINOR
+                  "." LUA_VERSION_RELEASE "\n", stdout);
+            fflush(stdout);
+        } else {
+            l_message("lua", "unknown option (use -e, -i, -v, -, or --)");
             lua_close(L);
             return 1;
-        } else {
-            script_idx = i;
-            break;
         }
     }
 
     int rc = 0;
-    if (script_idx > 0) {
+    if (from_stdin) {
+        if (dostdin(L) != LUA_OK) rc = 1;
+    } else if (script_idx > 0) {
         if (dofile_lua(L, argv[script_idx]) != LUA_OK) rc = 1;
-    } else if (!saw_e) {
-        repl(L);
+    } else if (!saw_e && !saw_v && !want_interactive) {
+        /* Bare `lua` with no action: drop into the REPL. If any of
+           -e / -v / -i was used, don't auto-enter — the user has to
+           ask for the REPL explicitly with -i. */
+        want_interactive = 1;
     }
-    /* If -e ran without a script and without -i, exit normally — matches
-       standard lua behavior, and avoids "accidentally dropping into the
-       REPL after executing a one-liner". */
+    if (want_interactive) repl(L);
 
     lua_close(L);
     return rc;

@@ -3,97 +3,87 @@
 #include "lib/kprintf.h"
 
 typedef struct heap_block {
-    uint32_t size;          /* size of data area (not including header) */
+    uint64_t size;
     bool     is_free;
     struct heap_block *next;
+    uint64_t _pad;              /* force sizeof to 32 so returned
+                                   pointers stay 16-byte aligned — the
+                                   SysV AMD64 ABI assumes locals with
+                                   __attribute__((aligned(16))) live on
+                                   a 16-aligned stack, which breaks if
+                                   task kernel stacks come back at
+                                   offset 24 from a 16-aligned base. */
 } heap_block_t;
 
 #define HEADER_SIZE (sizeof(heap_block_t))
-#define ALIGN16(x) (((x) + 15) & ~15)
+#define ALIGN16(x) (((x) + 15) & ~(uint64_t)15)
 
 static heap_block_t *heap_start;
-static uint32_t      heap_total;
+static uint64_t      heap_total;
 
-void heap_init(uint32_t start, uint32_t size) {
-    /* Align start to 16 bytes */
+void heap_init(uint64_t start, uint64_t size) {
     start = ALIGN16(start);
-    heap_start = (heap_block_t *)start;
+    heap_start = (heap_block_t *)(uintptr_t)start;
     heap_total = size;
-
     heap_start->size    = size - HEADER_SIZE;
     heap_start->is_free = true;
-    heap_start->next    = NULL;
-
-    serial_printf("[heap] Initialized at 0x%x, %u bytes\n", start, size);
+    heap_start->next    = 0;
+    serial_printf("[heap] initialised at 0x%lx (%lu bytes)\n", start, size);
 }
 
-void *kmalloc(uint32_t size) {
-    if (size == 0) return NULL;
+void *kmalloc(uint64_t size) {
+    if (size == 0) return 0;
     size = ALIGN16(size);
 
     heap_block_t *block = heap_start;
     while (block) {
         if (block->is_free && block->size >= size) {
-            /* Split if there's enough room for another block */
             if (block->size >= size + HEADER_SIZE + 16) {
-                heap_block_t *new_block = (heap_block_t *)((uint8_t *)block + HEADER_SIZE + size);
-                new_block->size    = block->size - size - HEADER_SIZE;
-                new_block->is_free = true;
-                new_block->next    = block->next;
+                heap_block_t *nb = (heap_block_t *)((uint8_t *)block + HEADER_SIZE + size);
+                nb->size    = block->size - size - HEADER_SIZE;
+                nb->is_free = true;
+                nb->next    = block->next;
                 block->size = size;
-                block->next = new_block;
+                block->next = nb;
             }
             block->is_free = false;
-            return (void *)((uint8_t *)block + HEADER_SIZE);
+            return (uint8_t *)block + HEADER_SIZE;
         }
         block = block->next;
     }
-
-    kprintf("kmalloc: out of memory (requested %u bytes)\n", size);
-    return NULL;
+    kprintf("kmalloc: OOM (requested %lu bytes)\n", size);
+    return 0;
 }
 
 void kfree(void *ptr) {
     if (!ptr) return;
-
     heap_block_t *block = (heap_block_t *)((uint8_t *)ptr - HEADER_SIZE);
     block->is_free = true;
 
-    /* Coalesce with next block if it's free */
     if (block->next && block->next->is_free) {
         block->size += HEADER_SIZE + block->next->size;
-        block->next = block->next->next;
+        block->next  = block->next->next;
     }
-
-    /* Coalesce with previous block if it's free */
     heap_block_t *prev = heap_start;
     if (prev != block) {
-        while (prev && prev->next != block) {
-            prev = prev->next;
-        }
+        while (prev && prev->next != block) prev = prev->next;
         if (prev && prev->is_free) {
             prev->size += HEADER_SIZE + block->size;
-            prev->next = block->next;
+            prev->next  = block->next;
         }
     }
 }
 
-uint32_t heap_get_used(void) {
-    uint32_t used = 0;
-    heap_block_t *block = heap_start;
-    while (block) {
-        if (!block->is_free) used += block->size + HEADER_SIZE;
-        block = block->next;
-    }
-    return used;
+uint64_t heap_get_used(void) {
+    uint64_t u = 0;
+    for (heap_block_t *b = heap_start; b; b = b->next)
+        if (!b->is_free) u += b->size + HEADER_SIZE;
+    return u;
 }
 
-uint32_t heap_get_free(void) {
-    uint32_t free_bytes = 0;
-    heap_block_t *block = heap_start;
-    while (block) {
-        if (block->is_free) free_bytes += block->size;
-        block = block->next;
-    }
-    return free_bytes;
+uint64_t heap_get_free(void) {
+    uint64_t f = 0;
+    for (heap_block_t *b = heap_start; b; b = b->next)
+        if (b->is_free) f += b->size;
+    return f;
 }

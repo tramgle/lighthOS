@@ -1,15 +1,15 @@
 /* Install user binaries from the ramfs /bin into /disk/bin so they
    survive across reboots. Dev-flow tool: assumes a ramfs boot (ISO)
-   with a FAT disk mounted at /disk — you can then rebuild, boot the
-   bootdisk image, and the installed system sees / as the FAT root.
-   The primary install path is now `make docker-disk` on the host,
-   which mcopy's directly; this binary is the fallback for in-QEMU
-   installs. No more chroot — the post-install flow is just reboot. */
+   with a FAT disk mounted at /disk. The primary install path is
+   `make docker-disk` on the host; this binary is the in-QEMU
+   fallback. */
 
-#include "syscall.h"
-#include "ulib.h"
+#include <stdio.h>
+#include "ulib_x64.h"
 
 #define CHUNK 4096
+
+struct readdir_ent { char name[64]; uint32_t type; };
 
 static int file_exists(const char *path) {
     struct vfs_stat st;
@@ -19,12 +19,11 @@ static int file_exists(const char *path) {
 static int copy_file(const char *src, const char *dst) {
     int in = sys_open(src, O_RDONLY);
     if (in < 0) { printf("install: cannot read %s\n", src); return -1; }
-
     int out = sys_open(dst, O_WRONLY | O_CREAT | O_TRUNC);
     if (out < 0) { printf("install: cannot write %s\n", dst); sys_close(in); return -1; }
 
     char buf[CHUNK];
-    int32_t n;
+    long n;
     uint32_t total = 0;
     while ((n = sys_read(in, buf, sizeof(buf))) > 0) {
         if (sys_write(out, buf, n) != n) {
@@ -32,7 +31,7 @@ static int copy_file(const char *src, const char *dst) {
             sys_close(in); sys_close(out);
             return -1;
         }
-        total += n;
+        total += (uint32_t)n;
     }
     sys_close(in);
     sys_close(out);
@@ -40,77 +39,56 @@ static int copy_file(const char *src, const char *dst) {
     return 0;
 }
 
-int main(int argc, char **argv) {
-    (void)argc; (void)argv;
+static void join(char *out, const char *pre, const char *name) {
+    int p = 0;
+    for (const char *s = pre; *s && p < 126; s++) out[p++] = *s;
+    for (int j = 0; name[j] && p < 126; j++) out[p++] = name[j];
+    out[p] = 0;
+}
+
+static uint32_t install_dir(const char *src_dir, const char *dst_dir) {
+    if (!file_exists(dst_dir)) sys_mkdir(dst_dir);
+
+    struct readdir_ent e;
+    uint32_t copied = 0;
+    for (uint32_t i = 0;
+         _syscall3(SYS_READDIR, (long)(uintptr_t)src_dir, i,
+                   (long)(uintptr_t)&e) == 0;
+         i++) {
+        if (e.type != VFS_FILE) continue;
+        char src[128], dst[128];
+        char sprefix[64], dprefix[64];
+        int sp = 0; for (const char *s = src_dir; *s; s++) sprefix[sp++] = *s;
+        if (sp == 0 || sprefix[sp - 1] != '/') sprefix[sp++] = '/';
+        sprefix[sp] = 0;
+        int dp = 0; for (const char *s = dst_dir; *s; s++) dprefix[dp++] = *s;
+        if (dp == 0 || dprefix[dp - 1] != '/') dprefix[dp++] = '/';
+        dprefix[dp] = 0;
+        join(src, sprefix, e.name);
+        join(dst, dprefix, e.name);
+        if (copy_file(src, dst) == 0) copied++;
+    }
+    return copied;
+}
+
+int main(int argc, char **argv, char **envp) {
+    (void)argc; (void)argv; (void)envp;
 
     if (!file_exists("/disk")) {
-        puts("install: /disk not mounted — boot with a disk (make run-disk)\n");
+        puts("install: /disk not mounted — boot with a disk (make run-disk)");
         return 1;
     }
 
-    /* Ensure /disk/bin exists. */
-    if (!file_exists("/disk/bin")) {
-        if (sys_mkdir("/disk/bin") != 0) {
-            puts("install: mkdir /disk/bin failed\n");
-            return 1;
-        }
-    }
+    puts("Installing /bin/* -> /disk/bin/*");
+    uint32_t bcount = install_dir("/bin", "/disk/bin");
+    printf("  %u binaries installed\n", bcount);
 
-    puts("Installing /bin/* -> /disk/bin/*\n");
-
-    char name[VFS_MAX_NAME];
-    uint32_t type;
-    uint32_t copied = 0, failed = 0;
-    for (uint32_t i = 0; sys_readdir("/bin", i, name, &type) == 0; i++) {
-        if (type != 1 /* VFS_FILE */) continue;
-
-        char src[128];
-        char dst[128];
-        int p = 0;
-        for (const char *s = "/bin/"; *s; s++) src[p++] = *s;
-        for (int j = 0; name[j] && p < 126; j++) src[p++] = name[j];
-        src[p] = '\0';
-
-        p = 0;
-        for (const char *s = "/disk/bin/"; *s; s++) dst[p++] = *s;
-        for (int j = 0; name[j] && p < 126; j++) dst[p++] = name[j];
-        dst[p] = '\0';
-
-        if (copy_file(src, dst) == 0) copied++;
-        else failed++;
-    }
-
-    printf("Installed %u files, %u failures\n", copied, failed);
-    if (failed) return 1;
-
-    /* Also copy /lib/*.so.1 — the dynamic linker runtime needs it
-       once the majority of /bin is dynamic. Missing on an ISO that
-       doesn't ship ld.so yet, so the loop silently skips absent
-       sources. */
-    if (!file_exists("/disk/lib")) {
-        if (sys_mkdir("/disk/lib") != 0) { /* probably already exists */ }
-    }
     if (file_exists("/lib")) {
-        puts("Installing /lib/* -> /disk/lib/*\n");
-        char lname[VFS_MAX_NAME];
-        uint32_t ltype;
-        uint32_t lcopied = 0;
-        for (uint32_t i = 0; sys_readdir("/lib", i, lname, &ltype) == 0; i++) {
-            if (ltype != 1) continue;
-            char src[128], dst[128];
-            int p = 0;
-            for (const char *s = "/lib/"; *s; s++) src[p++] = *s;
-            for (int j = 0; lname[j] && p < 126; j++) src[p++] = lname[j];
-            src[p] = '\0';
-            p = 0;
-            for (const char *s = "/disk/lib/"; *s; s++) dst[p++] = *s;
-            for (int j = 0; lname[j] && p < 126; j++) dst[p++] = lname[j];
-            dst[p] = '\0';
-            if (copy_file(src, dst) == 0) lcopied++;
-        }
-        printf("  %u runtime files installed\n", lcopied);
+        puts("Installing /lib/* -> /disk/lib/*");
+        uint32_t lcount = install_dir("/lib", "/disk/lib");
+        printf("  %u runtime files installed\n", lcount);
     }
 
-    puts("Install complete. Reboot from the disk to run it.\n");
+    puts("Install complete. Reboot from the disk to run it.");
     return 0;
 }

@@ -54,7 +54,11 @@ static char stdout_buf[BUFSIZ];
 static char stderr_buf[BUFSIZ];
 
 static FILE _stdin  = { 0, 0 /*RDONLY*/, _IONBF, stdin_buf,  BUFSIZ, 0, 0, 0, 0, 0 };
-static FILE _stdout = { 1, 1 /*WRONLY*/, _IOLBF, stdout_buf, BUFSIZ, 0, 0, 0, 0, 0 };
+/* stdout is unbuffered by default: terminal sessions interleave raw
+   sys_writes (shell echo, u_puts_n) with stdio writes (vi's printf),
+   and line-buffering reorders them. Callers that want batched output
+   can setvbuf themselves. */
+static FILE _stdout = { 1, 1 /*WRONLY*/, _IONBF, stdout_buf, BUFSIZ, 0, 0, 0, 0, 0 };
 static FILE _stderr = { 2, 1 /*WRONLY*/, _IONBF, stderr_buf, BUFSIZ, 0, 0, 0, 0, 0 };
 
 FILE *stdin  = &_stdin;
@@ -270,14 +274,15 @@ int fputc(int c, FILE *f) {
 }
 
 int putc(int c, FILE *f) { return fputc(c, f); }
-int putchar_lib(int c) { return fputc(c, stdout); }  /* avoid colliding with ulib's putchar */
+int putchar(int c)       { return fputc(c, stdout); }
 
 int fputs(const char *s, FILE *f) {
     size_t n = strlen(s);
     return (fwrite(s, 1, n, f) == n) ? 0 : EOF;
 }
 
-int puts_lib(const char *s) {
+/* ISO C: puts() writes the string AND a trailing newline. */
+int puts(const char *s) {
     if (fputs(s, stdout) != 0) return EOF;
     return fputc('\n', stdout);
 }
@@ -353,8 +358,115 @@ int setvbuf(FILE *f, char *buf, int mode, size_t size) {
 FILE *tmpfile(void) { return 0; }
 char *tmpnam(char *buf) { (void)buf; return 0; }
 FILE *freopen(const char *path, const char *mode, FILE *f) { (void)path; (void)mode; (void)f; return 0; }
-FILE *popen(const char *cmd, const char *mode) { (void)cmd; (void)mode; return 0; }
-int   pclose(FILE *f) { (void)f; return -1; }
+
+/* popen: fork + pipe + execve. "r" mode: parent reads child's stdout.
+   "w" mode: parent writes to child's stdin. No shell quoting —
+   tokenized the same way as libc system(). The child's pid is
+   stashed in a small side table so pclose can reap and return the
+   exit status. */
+#define POPEN_SLOTS 8
+static struct { FILE *f; long pid; } popen_tab[POPEN_SLOTS];
+
+static void popen_remember(FILE *f, long pid) {
+    for (int i = 0; i < POPEN_SLOTS; i++) {
+        if (popen_tab[i].f == 0) { popen_tab[i].f = f; popen_tab[i].pid = pid; return; }
+    }
+}
+static long popen_forget(FILE *f) {
+    for (int i = 0; i < POPEN_SLOTS; i++) {
+        if (popen_tab[i].f == f) {
+            long p = popen_tab[i].pid;
+            popen_tab[i].f = 0; popen_tab[i].pid = 0;
+            return p;
+        }
+    }
+    return -1;
+}
+
+FILE *popen(const char *cmd, const char *mode) {
+    if (!cmd || !mode || !*mode) return 0;
+    int read_mode = (mode[0] == 'r');
+    if (!read_mode && mode[0] != 'w') return 0;
+
+    /* Tokenize cmd into argv. */
+    #define POPEN_ARGC 16
+    static char buf[256];
+    static char *argv[POPEN_ARGC + 1];
+    size_t n = 0;
+    while (cmd[n] && n < sizeof(buf) - 1) { buf[n] = cmd[n]; n++; }
+    buf[n] = 0;
+    int argc = 0; size_t i = 0;
+    while (i < n && argc < POPEN_ARGC) {
+        while (i < n && (buf[i] == ' ' || buf[i] == '\t')) i++;
+        if (i >= n) break;
+        argv[argc++] = &buf[i];
+        while (i < n && buf[i] != ' ' && buf[i] != '\t') i++;
+        if (i < n) { buf[i++] = 0; }
+    }
+    argv[argc] = 0;
+    if (argc == 0) return 0;
+
+    char path[128];
+    if (argv[0][0] == '/') {
+        size_t l = 0; while (argv[0][l] && l < sizeof(path) - 1) { path[l] = argv[0][l]; l++; }
+        path[l] = 0;
+    } else {
+        const char *bin = "/bin/"; size_t l = 0;
+        while (bin[l]) { path[l] = bin[l]; l++; }
+        size_t k = 0;
+        while (argv[0][k] && l < sizeof(path) - 1) { path[l++] = argv[0][k++]; }
+        path[l] = 0;
+    }
+
+    int pipefd[2];
+    if (sys_pipe(pipefd) < 0) return 0;
+
+    long pid = sys_fork();
+    if (pid < 0) {
+        sys_close(pipefd[0]); sys_close(pipefd[1]);
+        return 0;
+    }
+    if (pid == 0) {
+        if (read_mode) {
+            sys_close(pipefd[0]); sys_dup2(pipefd[1], 1); sys_close(pipefd[1]);
+        } else {
+            sys_close(pipefd[1]); sys_dup2(pipefd[0], 0); sys_close(pipefd[0]);
+        }
+        sys_execve(path, argv, 0);
+        sys_exit(127);
+    }
+
+    int parent_fd, child_fd;
+    if (read_mode) { parent_fd = pipefd[0]; child_fd = pipefd[1]; }
+    else           { parent_fd = pipefd[1]; child_fd = pipefd[0]; }
+    sys_close(child_fd);
+
+    FILE *f = (FILE *)malloc(sizeof(FILE));
+    if (!f) { sys_close(parent_fd); return 0; }
+    f->fd = parent_fd;
+    f->mode = read_mode ? 0 : 1;
+    f->bufmode = _IOFBF;
+    f->buf = (char *)malloc(BUFSIZ);
+    f->bufsize = BUFSIZ;
+    f->bufpos = f->buflen = 0;
+    f->flags = 0; f->ungot_ch = 0; f->owns_buf = 1;
+    if (!f->buf) { free(f); sys_close(parent_fd); return 0; }
+    popen_remember(f, pid);
+    return f;
+}
+
+int pclose(FILE *f) {
+    if (!f) return -1;
+    long pid = popen_forget(f);
+    fflush(f);
+    sys_close(f->fd);
+    if (f->owns_buf && f->buf) free(f->buf);
+    free(f);
+    if (pid <= 0) return -1;
+    int status = 0;
+    sys_waitpid((int)pid, &status);
+    return status;
+}
 int   remove(const char *path) { return sys_unlink(path); }
 int   rename(const char *from, const char *to) { (void)from; (void)to; return -1; }
 
@@ -366,6 +478,15 @@ int vfprintf(FILE *f, const char *fmt, va_list ap) {
     size_t to_write = (size_t)n;
     if (to_write > sizeof(scratch) - 1) to_write = sizeof(scratch) - 1;
     fwrite(scratch, 1, to_write, f);
+    return n;
+}
+
+int printf(const char *fmt, ...) {
+    char scratch[1024];
+    va_list ap; va_start(ap, fmt);
+    int n = vsnprintf(scratch, sizeof(scratch), fmt, ap);
+    va_end(ap);
+    if (n > 0) fwrite(scratch, 1, (size_t)n, stdout);
     return n;
 }
 

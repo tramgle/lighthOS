@@ -1,28 +1,20 @@
-/* chroot <dir> [cmd [args...]]: change root to <dir>, then exec the
-   given command (default /bin/shell). We execve rather than spawn so
-   that the caller's process struct keeps the new root — spawn would
-   fork a child with its own inherited root but the parent would have
-   the new chroot too, and there'd be no clean return. */
+/* chroot <dir> [cmd [args...]]
+ * Call sys_chroot(dir), then execve the command (default /bin/shell).
+ * Resulting process inherits the new root via the kernel's chroot
+ * field. Run inside a fork() so the parent's root is untouched. */
+#include "ulib_x64.h"
 
-#include "syscall.h"
-#include "ulib.h"
-
-int main(int argc, char **argv) {
-    if (argc < 2) { puts("usage: chroot <dir> [cmd [args...]]\n"); return 1; }
-
-    if (sys_chroot(argv[1]) != 0) {
-        printf("chroot: %s: not a directory or not found\n", argv[1]);
-        return 1;
-    }
-
-    char *cmd = (argc >= 3) ? argv[2] : "/bin/shell";
-    char *default_argv[] = { cmd, 0 };
-    char **child_argv = (argc >= 3) ? &argv[2] : default_argv;
-
-    if (sys_execve(cmd, child_argv) != 0) {
-        printf("chroot: cannot exec %s\n", cmd);
-        return 1;
-    }
-    /* unreachable */
-    return 0;
+int main(int argc, char **argv, char **envp) {
+    (void)envp;
+    if (argc < 2) { u_puts_n("chroot: usage: dir [cmd [args...]]\n"); return 2; }
+    if (sys_chroot(argv[1]) != 0) { u_puts_n("chroot: failed\n"); return 1; }
+    const char *cmd = (argc >= 3) ? argv[2] : "/bin/shell";
+    char *exec_argv[16];
+    int ai = 0;
+    exec_argv[ai++] = (char *)cmd;
+    for (int i = 3; i < argc && ai < 15; i++) exec_argv[ai++] = argv[i];
+    exec_argv[ai] = 0;
+    sys_execve(cmd, exec_argv, 0);
+    u_puts_n("chroot: execve failed\n");
+    return 1;
 }

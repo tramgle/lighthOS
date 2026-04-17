@@ -1,13 +1,11 @@
-/* dyn_echo — dynamic-linking pilot for libvibc.so.1.
-   Uses libvibc's snprintf (which itself calls ulib's strlen) to prove
-   the DT_NEEDED libvibc → libulib chain resolves. Each argv entry
-   goes to stdout, space-separated, newline-terminated. */
-
-#include "syscall.h"
+/* dyn_echo — joins argv with spaces. Dynamic-linked against
+ * libvibc.so.1 (for snprintf) + libulib.so.1 (transitive).
+ * Exercises recursive DT_NEEDED resolution. */
 #include "ulib.h"
-#include <stdio.h>   /* libvibc snprintf declaration */
+#include <stdio.h>
 
-int main(int argc, char **argv) {
+int main(int argc, char **argv, char **envp) {
+    (void)envp;
     char buf[256];
     int pos = 0;
     for (int i = 1; i < argc; i++) {

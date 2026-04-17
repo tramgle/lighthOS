@@ -56,12 +56,17 @@ void *memcpy(void *dest, const void *src, size_t n) {
     return dest;
 }
 
-void putchar(char c) {
-    sys_write(1, &c, 1);
-}
+static void local_putc(char c) { sys_write(1, &c, 1); }
 
-void puts(const char *s) {
+/* ISO-C puts/putchar. Weak so libvibc's full stdio-backed versions
+   win when both libs link (static binaries that want FILE* buffering),
+   while dynamic binaries that only DT_NEEDED libulib.so.1 still get a
+   working puts via these. */
+__attribute__((weak)) int putchar(int c) { local_putc((char)c); return c; }
+__attribute__((weak)) int puts(const char *s) {
     sys_write(1, s, strlen(s));
+    sys_write(1, "\n", 1);
+    return 0;
 }
 
 /* Render `val` in `base` to `buf` (at most 32 chars). Returns length. */
@@ -78,14 +83,15 @@ static int uint_to_buf(uint32_t val, int base, char *buf) {
 
 static void emit_padded(const char *buf, int len, int width, int left_align, char pad) {
     if (!left_align) {
-        for (int i = len; i < width; i++) putchar(pad);
+        for (int i = len; i < width; i++) local_putc(pad);
     }
-    for (int i = 0; i < len; i++) putchar(buf[i]);
+    for (int i = 0; i < len; i++) local_putc(buf[i]);
     if (left_align) {
-        for (int i = len; i < width; i++) putchar(' ');
+        for (int i = len; i < width; i++) local_putc(' ');
     }
 }
 
+__attribute__((weak)) int printf(const char *fmt, ...);
 int printf(const char *fmt, ...) {
     va_list args;
     va_start(args, fmt);
@@ -93,7 +99,7 @@ int printf(const char *fmt, ...) {
 
     for (; *fmt; fmt++) {
         if (*fmt != '%') {
-            putchar(*fmt);
+            local_putc(*fmt);
             count++;
             continue;
         }
@@ -156,10 +162,10 @@ int printf(const char *fmt, ...) {
             emit_padded(s, slen, width, left_align, ' ');
             break;
         }
-        case 'c': putchar((char)va_arg(args, int)); break;
-        case '%': putchar('%'); break;
+        case 'c': local_putc((char)va_arg(args, int)); break;
+        case '%': local_putc('%'); break;
         case '\0': va_end(args); return count;
-        default: putchar('%'); putchar(*fmt); break;
+        default: local_putc('%'); local_putc(*fmt); break;
         }
     }
     va_end(args);
@@ -318,16 +324,49 @@ sighandler_t signal(int signo, sighandler_t handler) {
     /* Kernel-side disposition: SIG_DFL/SIG_IGN pass straight through
        (the kernel interprets 0 and 1 specially and never calls the
        trampoline for them). Anything else uses our thunk. */
-    uint32_t karg;
+    uintptr_t karg;
     if (handler == SIG_DFL) karg = 0;
     else if (handler == SIG_IGN) karg = 1;
-    else karg = (uint32_t)_ulib_sig_thunk;
+    else karg = (uintptr_t)_ulib_sig_thunk;
 
-    int32_t rc = sys_signal(signo, (void (*)(int))karg);
+    long rc = sys_signal(signo, (void (*)(int))karg);
     if (rc < 0) {
         /* Kernel rejected (uncatchable or invalid) — roll back. */
         _user_sighandlers[signo] = prev;
         return SIG_ERR;
     }
     return prev ? prev : SIG_DFL;
+}
+
+/* Heap-growth primitive for libc/malloc.c. sbrk-style: each call
+   advances the user heap by `delta` bytes and returns the old
+   break (pre-grow pointer). Backed by an mmap_anon arena that
+   grows 64 KiB at a time. Not thread-safe (we don't have threads). */
+long sys_sbrk(long delta) {
+    static uint8_t *heap_cur = 0;
+    static uint8_t *heap_end = 0;
+    /* Start above ld.so's fixed regions: ld.so itself at 0x40000000,
+       DL iface at 0x50000000. Dynamic binaries (Lua) would otherwise
+       collide on first grow. */
+    static uint64_t arena_next = 0x60000000ULL;
+    const long CHUNK = 0x10000;                /* 64 KiB */
+
+    if (!heap_cur) {
+        long got = sys_mmap_anon((void *)arena_next, CHUNK, PROT_READ | PROT_WRITE);
+        if (got < 0) return -1;
+        heap_cur = (uint8_t *)(uintptr_t)got;
+        heap_end = heap_cur + CHUNK;
+        arena_next += CHUNK;
+    }
+    if (delta <= 0) return (long)(uintptr_t)heap_cur;
+    while (heap_cur + delta > heap_end) {
+        long got = sys_mmap_anon((void *)arena_next, CHUNK, PROT_READ | PROT_WRITE);
+        if (got < 0) return -1;
+        if ((uint64_t)got != arena_next) return -1;
+        heap_end += CHUNK;
+        arena_next += CHUNK;
+    }
+    long ret = (long)(uintptr_t)heap_cur;
+    heap_cur += delta;
+    return ret;
 }

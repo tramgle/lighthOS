@@ -1,751 +1,781 @@
+/* x86_64 syscall dispatcher.
+ *
+ * INT 0x80 entry; RAX = syscall number; args in RDI/RSI/RDX/R10/R8/R9
+ * per SysV AMD64 "syscall" convention. Return in RAX.
+ */
+
 #include "kernel/syscall.h"
 #include "kernel/isr.h"
-#include "kernel/task.h"
 #include "kernel/process.h"
+#include "kernel/task.h"
+#include "kernel/timer.h"
 #include "lib/kprintf.h"
-#include "lib/string.h"
 #include "fs/vfs.h"
+#include "fs/fstab.h"
 #include "mm/vmm.h"
 #include "mm/pmm.h"
-#include "mm/heap.h"
-#include "include/io.h"
-#include "kernel/timer.h"
 #include "fs/blkdev.h"
-#include "fs/fstab.h"
+#include "mm/heap.h"
+#include "lib/string.h"
+#include "drivers/serial.h"
+#include "drivers/vga.h"
+#include "drivers/keyboard.h"
+#include "drivers/console.h"
 
-/* --- Convenience wrappers for user-pointer validation ---
-   USER_PATH copies a NUL-terminated path from user space into a
-   kernel-local char array. On fault/overlong, bails out with eax=-1.
-   USER_BUF_OK / USER_STRUCT_OK return early with eax=-1 on bad ptrs.
-   These keep the case bodies readable and uniform. */
-#define USER_PATH(user_ptr_reg, kbuf_name)                                    \
-    char kbuf_name[VFS_MAX_PATH];                                             \
-    if (strncpy_from_user(kbuf_name, (const char *)(user_ptr_reg),            \
-                          sizeof kbuf_name) < 0) {                            \
-        regs->eax = (uint32_t)-1; return regs;                                \
-    }
-#define USER_BUF_OK(ptr, len, write)                                          \
-    do {                                                                      \
-        if (!user_ptr_ok((const void *)(ptr), (len), (write))) {              \
-            regs->eax = (uint32_t)-1; return regs;                            \
-        }                                                                     \
-    } while (0)
-#define USER_STRUCT_OK(ptr, type, write) USER_BUF_OK(ptr, sizeof(type), write)
+/* Thin wrappers so the SYS_EXECVE case body reads cleanly even
+   though heap.h's names don't have module-prefix namespacing. */
+static inline void *kmalloc_wrap(uint64_t n) { return kmalloc(n); }
+static inline void  kfree_wrap(void *p)      { kfree(p); }
 
-/* -- strace ring. Single-target: one pid at a time, global ring buffer.
-      trace_target_pid == 0 means tracing is off. Records are appended
-      at syscall return with the full arg set captured at entry. Since
-      the dispatcher may overwrite eax/ebx/etc. across the call, we
-      snapshot the entry registers before handing off. -- */
-#define STRACE_RING 1024
+/* Resolve a user-supplied path through the current process's
+   cwd + chroot root. Returns NULL on overflow. The returned
+   pointer is to a static per-call buffer — caller must not hold
+   across syscall dispatches. */
+/* --- strace ring. Single target pid. Entry recorded on syscall
+   entry (or on exit-process), with the syscall's return value
+   stamped once the dispatcher fills it in.  trace_target_pid == 0
+   means tracing is off. */
+#define STRACE_RING 256
 struct strace_entry {
     uint32_t seq;
     uint32_t pid;
     uint32_t num;
-    uint32_t a1, a2, a3, a4;
-    int32_t  ret;
+    uint32_t exited;         /* 1 for the exited-process marker */
+    uint64_t a1, a2, a3, a4;
+    int64_t  ret;
 };
 static struct strace_entry trace_ring[STRACE_RING];
 static uint32_t trace_next_seq;
 static uint32_t trace_target_pid;
 
-static void trace_record(uint32_t pid, uint32_t num,
-                         uint32_t a1, uint32_t a2, uint32_t a3, uint32_t a4,
-                         int32_t ret) {
-    if (trace_target_pid == 0 || pid != trace_target_pid) return;
-    struct strace_entry *e = &trace_ring[trace_next_seq % STRACE_RING];
-    e->seq = trace_next_seq;
-    e->pid = pid;
-    e->num = num;
-    e->a1 = a1; e->a2 = a2; e->a3 = a3; e->a4 = a4;
-    e->ret = ret;
-    trace_next_seq++;
-}
+/* SYS_REGIONS: pmm_region_iter takes a callback with no context
+   pointer, so the dispatch stashes its state here for the duration
+   of the call. Serial syscall dispatch makes this safe. */
+uint64_t regions_target;
+uint64_t regions_seen;
+struct region_out regions_result;
+int regions_found;
 
-/* -- lsblk syscall payload. Mirrored in user/syscall.h. -- */
-struct blkdev_info_out {
-    char     name[32];
-    uint32_t total_sectors;
-    char     mount_path[32];   /* empty if not mounted */
-    char     fs_type[16];
-    uint32_t read_only;        /* 0 or 1 */
-};
-
-/* -- Diag syscall support -- */
-
-struct meminfo_out {
-    uint32_t total_frames;
-    uint32_t free_frames;
-    uint32_t heap_used;
-    uint32_t heap_free;
-};
-struct region_out {
-    uint32_t start_addr;
-    uint32_t end_addr;
-    uint32_t used;
-};
-struct pagemap_out {
-    uint32_t pde;
-    uint32_t pte;
-    uint32_t phys;
-    uint32_t pd_idx;
-    uint32_t pt_idx;
-};
-
-/* Two-pass region iteration: the first pass counts runs until we hit the
-   requested index; the second pass returns that run. pmm_region_iter
-   doesn't have a "return nth" variant, so we piggyback on the callback
-   via file-locals. Syscalls are serialized (single-CPU, int-gate) so
-   sharing these across calls is safe. */
-static uint32_t regions_target;
-static uint32_t regions_seen;
-static struct region_out regions_result;
-static bool regions_found;
-
-static void regions_collect(uint32_t start_frame, uint32_t len, bool used) {
+void regions_collect_cb(uint32_t start_frame, uint32_t len, bool used) {
     if (regions_found) return;
     if (regions_seen == regions_target) {
-        regions_result.start_addr = start_frame * PAGE_SIZE;
-        regions_result.end_addr = (start_frame + len) * PAGE_SIZE;
-        regions_result.used = used ? 1 : 0;
-        regions_found = true;
+        regions_result.start_addr = (uint64_t)start_frame * PAGE_SIZE;
+        regions_result.end_addr   = (uint64_t)(start_frame + len) * PAGE_SIZE;
+        regions_result.used       = used ? 1 : 0;
+        regions_result._pad       = 0;
+        regions_found = 1;
     }
     regions_seen++;
 }
 
-static registers_t *syscall_dispatch(registers_t *regs) {
-    uint32_t num = regs->eax;
+static void trace_record(uint32_t pid, uint32_t num,
+                         uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                         int64_t ret, int exited) {
+    if (trace_target_pid == 0 || pid != trace_target_pid) return;
+    struct strace_entry *e = &trace_ring[trace_next_seq % STRACE_RING];
+    e->seq = trace_next_seq;
+    e->pid = pid; e->num = num;
+    e->a1 = a1; e->a2 = a2; e->a3 = a3; e->a4 = a4;
+    e->ret = ret; e->exited = (uint32_t)exited;
+    trace_next_seq++;
+}
+
+void syscall_trace_exited(uint32_t pid, int code) {
+    trace_record(pid, 0, 0, 0, 0, 0, (int64_t)code, 1);
+    /* Disable tracing once target exits so subsequent processes
+       don't pollute the ring. */
+    if (pid == trace_target_pid) trace_target_pid = 0;
+}
+
+static char resolve_buf[VFS_MAX_PATH];
+static const char *resolve_path(const char *user_path) {
+    if (!user_path) return 0;
+    if (process_resolve_path(user_path, resolve_buf, sizeof(resolve_buf)) < 0)
+        return 0;
+    return resolve_buf;
+}
+
+#define SYS_EXIT     1
+#define SYS_READ     3
+#define SYS_WRITE    4
+#define SYS_OPEN     5
+#define SYS_CLOSE    6
+#define SYS_WAITPID  7
+#define SYS_UNLINK  10
+#define SYS_STAT    18
+#define SYS_LSEEK   19
+#define SYS_GETPID  20
+#define SYS_YIELD   24
+#define SYS_MKDIR   39
+#define SYS_MMAP_ANON 9
+#define SYS_MOUNT    21
+#define SYS_UMOUNT   22
+#define SYS_ALARM    27
+#define SYS_KILL     37
+#define SYS_PIPE     42
+#define SYS_SIGNAL   48
+#define SYS_DUP2     63
+#define SYS_FORK     57
+#define SYS_SIGRETURN 119
+#define SYS_SETPGID  109
+#define SYS_GETPGID  108
+#define SYS_CHROOT  161
+#define SYS_MPROTECT 125
+#define SYS_EXECVE  59
+#define SYS_READDIR 89
+#define SYS_SPAWN  120
+#define SYS_SHUTDOWN 201
+#define SYS_TIME       214
+#define SYS_TRACEME    231
+#define SYS_TRACE_READ 232
+
+static void acpi_shutdown(void) {
+    __asm__ volatile ("outw %0, %1" :: "a"((uint16_t)0x2000), "Nd"((uint16_t)0x604));
+    for (;;) __asm__ volatile ("hlt");
+}
+
+/* struct the user sees for stat. Matches user/syscall.h's vfs_stat. */
+struct user_vfs_stat {
+    uint32_t inode;
+    uint32_t type;
+    uint32_t size;
+};
+
+registers_t *syscall_handler(registers_t *regs) {
+    uint64_t num = regs->rax;
+    uint64_t a1 = regs->rdi;
+    uint64_t a2 = regs->rsi;
+    uint64_t a3 = regs->rdx;
+    uint64_t a4 = regs->r10;
+    (void)a3; (void)a4;
+
+    /* Entry-point trace hook. Snapshot args before dispatch
+       overwrites regs->rax with the return value. */
+    process_t *__cur = process_current();
+    uint32_t __cur_pid = __cur ? __cur->pid : 0;
+    int __traced = (__cur_pid == trace_target_pid);
+    uint64_t __entry_pos = 0;
+    if (__traced) {
+        __entry_pos = trace_next_seq;
+        trace_record(__cur_pid, (uint32_t)num, a1, a2, a3, a4, 0, 0);
+    }
 
     switch (num) {
-    case SYS_EXIT: {
-        process_t *p = process_current();
-        if (p) {
-            process_exit((int)regs->ebx);
-        } else {
-            task_current()->state = TASK_DEAD;
-        }
-        return schedule(regs);
-    }
+    case SYS_EXIT:
+        if (__traced) syscall_trace_exited(__cur_pid, (int)a1);
+        process_exit((int)a1);
+        regs->rax = 0;
+        break;
 
-    case SYS_READ: {
-        int fd = (int)regs->ebx;
-        size_t count = regs->edx;
-        if (count > 0) USER_BUF_OK(regs->ecx, count, 1);
-        regs->eax = (uint32_t)fd_read(fd, (void *)regs->ecx, count);
-        return regs;
-    }
+    case SYS_READ:
+        regs->rax = (uint64_t)(int64_t)fd_read((int)a1,
+            (void *)(uintptr_t)a2, (size_t)a3);
+        break;
 
-    case SYS_WRITE: {
-        int fd = (int)regs->ebx;
-        size_t count = regs->edx;
-        if (count > 0) USER_BUF_OK(regs->ecx, count, 0);
-        regs->eax = (uint32_t)fd_write(fd, (const void *)regs->ecx, count);
-        return regs;
-    }
+    case SYS_WRITE:
+        regs->rax = (uint64_t)(int64_t)fd_write((int)a1,
+            (const void *)(uintptr_t)a2, (size_t)a3);
+        break;
 
     case SYS_OPEN: {
-        USER_PATH(regs->ebx, upath);
-        char rp[VFS_MAX_PATH];
-        if (process_resolve_path(upath, rp, sizeof rp) != 0) {
-            regs->eax = (uint32_t)-1; return regs;
-        }
-        regs->eax = (uint32_t)fd_open(rp, regs->ecx);
-        return regs;
+        const char *p = resolve_path((const char *)(uintptr_t)a1);
+        regs->rax = p ? (uint64_t)(int64_t)fd_open(p, (uint32_t)a2)
+                      : (uint64_t)(int64_t)-1;
+        break;
     }
 
-    case SYS_CLOSE: {
-        regs->eax = (uint32_t)fd_close((int)regs->ebx);
-        return regs;
-    }
+    case SYS_CLOSE:
+        regs->rax = (uint64_t)(int64_t)fd_close((int)a1);
+        break;
 
-    case SYS_DUP2: {
-        int oldfd = (int)regs->ebx;
-        int newfd = (int)regs->ecx;
-        regs->eax = (uint32_t)fd_dup2(oldfd, newfd);
-        return regs;
-    }
-
-    case SYS_STAT: {
-        USER_PATH(regs->ebx, upath);
-        USER_STRUCT_OK(regs->ecx, struct vfs_stat, 1);
-        char rp[VFS_MAX_PATH];
-        if (process_resolve_path(upath, rp, sizeof rp) != 0) {
-            regs->eax = (uint32_t)-1; return regs;
-        }
-        /* Stat into a kernel scratch, then copy out — keeps the VFS
-           ignorant of user-pointer concerns. */
-        struct vfs_stat ks;
-        int32_t rc = vfs_stat(rp, &ks);
-        if (rc == 0) copy_to_user((void *)regs->ecx, &ks, sizeof ks);
-        regs->eax = (uint32_t)rc;
-        return regs;
+    case SYS_WAITPID: {
+        int status = 0;
+        int r = process_waitpid((uint32_t)a1, &status);
+        if (a2) *(int *)(uintptr_t)a2 = status;
+        regs->rax = (uint64_t)(int64_t)r;
+        break;
     }
 
     case SYS_UNLINK: {
-        USER_PATH(regs->ebx, upath);
-        char rp[VFS_MAX_PATH];
-        if (process_resolve_path(upath, rp, sizeof rp) != 0) {
-            regs->eax = (uint32_t)-1; return regs;
-        }
-        regs->eax = (uint32_t)vfs_unlink(rp);
-        return regs;
+        const char *p = resolve_path((const char *)(uintptr_t)a1);
+        regs->rax = p ? (uint64_t)(int64_t)vfs_unlink(p)
+                      : (uint64_t)(int64_t)-1;
+        break;
     }
 
-    case SYS_MKDIR: {
-        USER_PATH(regs->ebx, upath);
-        char rp[VFS_MAX_PATH];
-        if (process_resolve_path(upath, rp, sizeof rp) != 0) {
-            regs->eax = (uint32_t)-1; return regs;
+    case SYS_STAT: {
+        const char *p = resolve_path((const char *)(uintptr_t)a1);
+        if (!p) { regs->rax = (uint64_t)(int64_t)-1; break; }
+        struct vfs_stat kst;
+        int r = vfs_stat(p, &kst);
+        if (r == 0 && a2) {
+            struct user_vfs_stat *u = (struct user_vfs_stat *)(uintptr_t)a2;
+            u->inode = kst.inode;
+            u->type  = kst.type;
+            u->size  = kst.size;
         }
-        regs->eax = (uint32_t)vfs_mkdir(rp);
-        return regs;
+        regs->rax = (uint64_t)(int64_t)r;
+        break;
     }
+
+    case SYS_LSEEK:
+        regs->rax = (uint64_t)(int64_t)fd_lseek((int)a1, (off_t)a2, (int)a3);
+        break;
 
     case SYS_GETPID: {
         process_t *p = process_current();
-        regs->eax = p ? p->pid : task_current()->id;
-        return regs;
+        regs->rax = p ? p->pid : 0;
+        break;
     }
 
     case SYS_YIELD:
-        return schedule(regs);
+        regs->rax = 0;
+        break;
 
-    case SYS_WAITPID: {
-        if (regs->ecx) USER_STRUCT_OK(regs->ecx, int, 1);
-        int status = 0;
-        regs->eax = (uint32_t)process_waitpid(regs->ebx, &status);
-        if (regs->ecx) *(int *)regs->ecx = status;
-        return regs;
+    case SYS_MKDIR: {
+        const char *p = resolve_path((const char *)(uintptr_t)a1);
+        regs->rax = p ? (uint64_t)(int64_t)vfs_mkdir(p)
+                      : (uint64_t)(int64_t)-1;
+        break;
     }
 
-    case SYS_SBRK: {
-        process_t *p = process_current();
-        if (!p) { regs->eax = (uint32_t)-1; return regs; }
-        uint32_t increment = regs->ebx;
-        uint32_t old_brk = p->brk;
-        if (increment == 0) {
-            regs->eax = old_brk;
-            return regs;
-        }
-        /* Allocate pages for the new break region */
-        uint32_t new_brk = old_brk + increment;
-        uint32_t page = old_brk & ~(PAGE_SIZE - 1);
-        while (page < new_brk) {
-            if (!vmm_get_physical(page)) {
-                uint32_t frame = pmm_alloc_frame();
-                if (!frame) { regs->eax = (uint32_t)-1; return regs; }
-                vmm_map_page(page, frame, VMM_FLAG_PRESENT | VMM_FLAG_WRITE | VMM_FLAG_USER);
-            }
-            page += PAGE_SIZE;
-        }
-        p->brk = new_brk;
-        regs->eax = old_brk;
-        return regs;
-    }
-
-    case SYS_READDIR: {
-        USER_PATH(regs->ebx, upath);
-        /* name output buffer: conservative VFS_MAX_NAME bytes; type out: uint32_t. */
-        USER_BUF_OK(regs->edx, VFS_MAX_NAME, 1);
-        USER_STRUCT_OK(regs->esi, uint32_t, 1);
-        char rp[VFS_MAX_PATH];
-        if (process_resolve_path(upath, rp, sizeof rp) != 0) {
-            regs->eax = (uint32_t)-1; return regs;
-        }
-        char kname[VFS_MAX_NAME];
-        uint32_t ktype = 0;
-        int32_t rc = vfs_readdir(rp, regs->ecx, kname, &ktype);
-        if (rc == 0) {
-            copy_to_user((void *)regs->edx, kname, VFS_MAX_NAME);
-            *(uint32_t *)regs->esi = ktype;
-        }
-        regs->eax = (uint32_t)rc;
-        return regs;
-    }
-
-    case SYS_CHDIR: {
-        USER_PATH(regs->ebx, upath);
-        char rp[VFS_MAX_PATH];
-        if (process_resolve_path(upath, rp, sizeof rp) != 0) {
-            regs->eax = (uint32_t)-1; return regs;
-        }
-        struct vfs_stat st;
-        if (vfs_stat(rp, &st) != 0 || st.type != VFS_DIR) {
-            regs->eax = (uint32_t)-1;
-        } else {
-            process_t *p = process_current();
-            if (p) {
-                /* Store cwd in chroot-local form so subsequent
-                   process_resolve_path calls don't prepend the root
-                   twice. Also: inside a chroot, `cd ..` from "/"
-                   canon_into already clamps at "/", so the user can't
-                   escape via cwd manipulation. */
-                process_strip_root_prefix(rp, p->root);
-                strncpy(p->cwd, rp, VFS_MAX_PATH - 1);
-                p->cwd[VFS_MAX_PATH - 1] = '\0';
-            }
-            regs->eax = 0;
-        }
-        return regs;
-    }
-
-    case SYS_GETCWD: {
-        size_t size = regs->ecx;
-        if (!regs->ebx || size == 0) { regs->eax = 0; return regs; }
-        USER_BUF_OK(regs->ebx, size, 1);
-        process_t *p = process_current();
-        if (!p) { regs->eax = 0; return regs; }
-        /* Build into kernel buffer then copy back. */
-        char kbuf[VFS_MAX_PATH];
-        strncpy(kbuf, p->cwd, sizeof kbuf - 1);
-        kbuf[sizeof kbuf - 1] = '\0';
-        size_t klen = strlen(kbuf);
-        if (klen >= size) klen = size - 1;
-        copy_to_user((void *)regs->ebx, kbuf, klen);
-        char nul = '\0';
-        copy_to_user((void *)(regs->ebx + klen), &nul, 1);
-        regs->eax = regs->ebx;
-        return regs;
-    }
-
-    case SYS_FORK: {
-        regs->eax = (uint32_t)process_fork(regs);
-        return regs;
-    }
-
-    case SYS_EXECVE: {
-        USER_PATH(regs->ebx, upath);
-        /* argv + envp are walked by process_execve's snapshot loop —
-           it does its own strlen-per-entry. Pre-validate only that
-           the top-level pointers are in user space when non-NULL.
-           envp arrives in edx: 0 = inherit from current. */
-        if (regs->ecx) USER_STRUCT_OK(regs->ecx, void *, 0);
-        if (regs->edx) USER_STRUCT_OK(regs->edx, void *, 0);
-        char rp[VFS_MAX_PATH];
-        if (process_resolve_path(upath, rp, sizeof rp) != 0) {
-            regs->eax = (uint32_t)-1; return regs;
-        }
-        int rc = process_execve(regs, rp, (char *const *)regs->ecx,
-                                (char *const *)regs->edx);
-        if (rc != 0) regs->eax = (uint32_t)-1;
-        return regs;
-    }
-
-    case SYS_SPAWN: {
-        USER_PATH(regs->ebx, upath);
-        if (regs->ecx) USER_STRUCT_OK(regs->ecx, void *, 0);
-        if (regs->edx) USER_STRUCT_OK(regs->edx, void *, 0);
-        char rp[VFS_MAX_PATH];
-        if (process_resolve_path(upath, rp, sizeof rp) != 0) {
-            regs->eax = (uint32_t)-1; return regs;
-        }
-        regs->eax = (uint32_t)process_spawn(rp,
-                                            (char *const *)regs->ecx,
-                                            (char *const *)regs->edx);
-        return regs;
-    }
-
-    case SYS_PS: {
-        USER_STRUCT_OK(regs->ecx, proc_info_t, 1);
-        proc_info_t kout;
-        int32_t rc = process_info(regs->ebx, &kout);
-        if (rc == 0) copy_to_user((void *)regs->ecx, &kout, sizeof kout);
-        regs->eax = (uint32_t)rc;
-        return regs;
-    }
-
-    case SYS_MEMINFO: {
-        USER_STRUCT_OK(regs->ebx, struct meminfo_out, 1);
-        struct meminfo_out k;
-        k.total_frames = pmm_get_total_count();
-        k.free_frames  = pmm_get_free_count();
-        k.heap_used    = heap_get_used();
-        k.heap_free    = heap_get_free();
-        copy_to_user((void *)regs->ebx, &k, sizeof k);
-        regs->eax = 0;
-        return regs;
-    }
-
-    case SYS_REGIONS: {
-        USER_STRUCT_OK(regs->ecx, struct region_out, 1);
-        regions_target = regs->ebx;
-        regions_seen = 0;
-        regions_found = false;
-        pmm_region_iter(regions_collect);
-        if (regions_found) {
-            copy_to_user((void *)regs->ecx, &regions_result, sizeof regions_result);
-            regs->eax = 0;
-        } else {
-            regs->eax = (uint32_t)-1;
-        }
-        return regs;
-    }
-
-    case SYS_PAGEMAP: {
-        USER_STRUCT_OK(regs->ecx, struct pagemap_out, 1);
-        uint32_t va = regs->ebx;
-        uint32_t *pd = task_current_pd();
-        if (!pd) { regs->eax = (uint32_t)-1; return regs; }
-        struct pagemap_out k = {0};
-        k.pd_idx = va >> 22;
-        k.pt_idx = (va >> 12) & 0x3FF;
-        k.pde = pd[k.pd_idx];
-        if (k.pde & VMM_FLAG_PRESENT) {
-            uint32_t *pt = (uint32_t *)(k.pde & 0xFFFFF000);
-            k.pte = pt[k.pt_idx];
-            if (k.pte & VMM_FLAG_PRESENT) {
-                k.phys = (k.pte & 0xFFFFF000) | (va & 0xFFF);
-            }
-        }
-        copy_to_user((void *)regs->ecx, &k, sizeof k);
-        regs->eax = 0;
-        return regs;
-    }
-
-    case SYS_PEEK: {
-        /* Copy `count` bytes from arbitrary kernel address `src` into the
-           user's buffer. Restrict reads to the first 16MB identity-mapped
-           region on the source side, and validate the user destination
-           range. */
-        uint32_t src = regs->ebx;
-        uint32_t count = regs->edx;
-        if (count == 0) { regs->eax = 0; return regs; }
-        if (src >= 0x01000000u || src + count > 0x01000000u ||
-            src + count < src) {
-            regs->eax = (uint32_t)-1;
-            return regs;
-        }
-        if (copy_to_user((void *)regs->ecx, (const void *)src, count) < 0) {
-            regs->eax = (uint32_t)-1; return regs;
-        }
-        regs->eax = (uint32_t)count;
-        return regs;
-    }
-
-    case SYS_TIME: {
-        /* Ticks since boot at 100Hz. User code divides by 100 for seconds. */
-        regs->eax = timer_get_ticks();
-        return regs;
-    }
-
-    case SYS_BLKDEVS: {
-        USER_STRUCT_OK(regs->ecx, struct blkdev_info_out, 1);
-        blkdev_t *dev = blkdev_nth((int)regs->ebx);
-        if (!dev) { regs->eax = (uint32_t)-1; return regs; }
-        struct blkdev_info_out k;
-        memset(&k, 0, sizeof k);
-        strncpy(k.name, dev->name, sizeof k.name - 1);
-        k.total_sectors = dev->total_sectors;
-        strncpy(k.mount_path, dev->mount_path, sizeof k.mount_path - 1);
-        strncpy(k.fs_type, dev->fs_type, sizeof k.fs_type - 1);
-        k.read_only = dev->read_only ? 1 : 0;
-        copy_to_user((void *)regs->ecx, &k, sizeof k);
-        regs->eax = 0;
-        return regs;
-    }
-
-    case SYS_LSEEK: {
-        int fd = (int)regs->ebx;
-        off_t off = (off_t)(int32_t)regs->ecx;
-        int whence = (int)regs->edx;
-        regs->eax = (uint32_t)fd_lseek(fd, off, whence);
-        return regs;
-    }
-
-    case SYS_KILL: {
-        int target = (int)regs->ebx;
-        int signo = (int)regs->ecx;
-        regs->eax = (uint32_t)process_signal(target, signo);
-        return regs;
-    }
-
-    case SYS_SETPGID: {
-        uint32_t pid = regs->ebx;
-        uint32_t pgid = regs->ecx;
-        process_t *p = process_current();
-        process_t *target = (pid == 0) ? p : process_get(pid);
-        if (!target) { regs->eax = (uint32_t)-1; return regs; }
-        target->pgid = (pgid == 0) ? target->pid : pgid;
-        regs->eax = 0;
-        return regs;
-    }
-
-    case SYS_GETPGID: {
-        uint32_t pid = regs->ebx;
-        process_t *target = (pid == 0) ? process_current() : process_get(pid);
-        regs->eax = target ? target->pgid : (uint32_t)-1;
-        return regs;
-    }
-
-    case SYS_CHROOT: {
-        USER_PATH(regs->ebx, upath);
-        char target[VFS_MAX_PATH];
-        if (process_resolve_path(upath, target, sizeof target) != 0) {
-            regs->eax = (uint32_t)-1; return regs;
-        }
-        struct vfs_stat st;
-        if (vfs_stat(target, &st) != 0 || st.type != VFS_DIR) {
-            regs->eax = (uint32_t)-1; return regs;
-        }
-        process_t *p = process_current();
-        if (!p) { regs->eax = (uint32_t)-1; return regs; }
-        /* Strip trailing slash from root so later prepend produces a
-           canonical "/root/subpath" not "/root//subpath". Keep a lone
-           "/" as-is (empty chroot). */
-        int tlen = 0;
-        while (target[tlen]) tlen++;
-        if (tlen > 1 && target[tlen - 1] == '/') tlen--;
-        int copy = tlen < (int)sizeof p->root - 1 ? tlen : (int)sizeof p->root - 1;
-        for (int i = 0; i < copy; i++) p->root[i] = target[i];
-        p->root[copy] = '\0';
-        /* Per chroot(2) semantics, cwd becomes '/' in the new root. */
-        strcpy(p->cwd, "/");
-        regs->eax = 0;
-        return regs;
-    }
-
-    case SYS_PIPE: {
-        /* User hands in an int[2] buffer. Validate, create the pipe
-           into a local pair, then copy back. */
-        USER_BUF_OK(regs->ebx, sizeof(int) * 2, 1);
-        int kfds[2];
-        int rc = fd_pipe(kfds);
-        if (rc == 0) copy_to_user((void *)regs->ebx, kfds, sizeof kfds);
-        regs->eax = (uint32_t)rc;
-        return regs;
-    }
-
-    case SYS_SIGNAL: {
-        int signo = (int)regs->ebx;
-        uint32_t handler = regs->ecx;
-        regs->eax = (uint32_t)process_sig_install(signo, handler);
-        return regs;
-    }
-
-    case SYS_MOUNT: {
-        /* ebx=source (blkdev name), ecx=target (path), edx=type,
-           esi=flags. All NUL-terminated user strings; we bounce each
-           through a kernel scratch via strncpy_from_user so the fs
-           code never sees user pointers. No permission model yet —
-           any process can mount. */
-        char ksource[32], ktype[16], kflags[8];
-        USER_PATH(regs->ecx, ktarget);
-        if (strncpy_from_user(ksource, (const char *)regs->ebx,
-                              sizeof ksource) < 0) {
-            regs->eax = (uint32_t)-1; return regs;
-        }
-        if (strncpy_from_user(ktype, (const char *)regs->edx,
-                              sizeof ktype) < 0) {
-            regs->eax = (uint32_t)-1; return regs;
-        }
-        if (regs->esi) {
-            if (strncpy_from_user(kflags, (const char *)regs->esi,
-                                  sizeof kflags) < 0) {
-                regs->eax = (uint32_t)-1; return regs;
-            }
-        } else {
-            kflags[0] = 'r'; kflags[1] = 'w'; kflags[2] = '\0';
-        }
-        char rp[VFS_MAX_PATH];
-        if (process_resolve_path(ktarget, rp, sizeof rp) != 0) {
-            regs->eax = (uint32_t)-1; return regs;
-        }
-        regs->eax = (uint32_t)fstab_do_mount(ksource, rp, ktype, kflags);
-        return regs;
-    }
-
-    case SYS_ALARM: {
-        regs->eax = process_set_alarm(regs->ebx);
-        return regs;
-    }
+    case SYS_DUP2:
+        regs->rax = (uint64_t)(int64_t)fd_dup2((int)a1, (int)a2);
+        break;
 
     case SYS_MMAP_ANON: {
-        /* ebx=addr, ecx=length, edx=prot.
-           Anonymous fixed-address mapping: allocates fresh zeroed
-           frames and installs them at exactly `addr` in the caller's
-           PD. Fails if the range collides with any existing mapping.
-           PROT_EXEC is accepted but unenforced (no NX on i386 without
-           PAE). No MAP_ANYWHERE yet — callers must know where they
-           want things. */
-        uint32_t addr   = regs->ebx;
-        uint32_t length = regs->ecx;
-        uint32_t prot   = regs->edx;
-
-        if (length == 0)                              { regs->eax = (uint32_t)-1; return regs; }
-        if (addr & (PAGE_SIZE - 1))                   { regs->eax = (uint32_t)-1; return regs; }
-        if (length & (PAGE_SIZE - 1))                 { regs->eax = (uint32_t)-1; return regs; }
-        if (addr < 0x08000000u)                       { regs->eax = (uint32_t)-1; return regs; }
-        if (addr + length < addr)                     { regs->eax = (uint32_t)-1; return regs; }
-        if (addr + length > 0xC0000000u)              { regs->eax = (uint32_t)-1; return regs; }
-
-        uint32_t *pd = task_current_pd();
-        if (!pd) { regs->eax = (uint32_t)-1; return regs; }
-
-        /* Overlap check: refuse if any page in the range is already
-           mapped. Caller's problem to avoid collisions. */
-        for (uint32_t off = 0; off < length; off += PAGE_SIZE) {
-            if (vmm_get_physical_in(pd, addr + off)) {
-                regs->eax = (uint32_t)-1; return regs;
+        /* mmap_anon(addr, len, prot) — allocate len-bytes rounded
+           to PAGE_SIZE, map at addr with USER|flags. Returns addr
+           on success, -1 on overlap or OOM. */
+        uint64_t addr = a1 & ~(uint64_t)(PAGE_SIZE - 1);
+        uint64_t len  = (a2 + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+        uint64_t prot = a3;
+        if (len == 0 || addr == 0) { regs->rax = (uint64_t)(int64_t)-1; break; }
+        uint64_t *pml4 = task_current_pml4();
+        if (!pml4) { regs->rax = (uint64_t)(int64_t)-1; break; }
+        /* reject overlap with any existing user mapping */
+        for (uint64_t va = addr; va < addr + len; va += PAGE_SIZE) {
+            if (vmm_get_physical_in(pml4, va)) {
+                regs->rax = (uint64_t)(int64_t)-1; goto mmap_done;
             }
         }
-
-        /* PROT → VMM flags. Always USER + PRESENT; WRITE bit optional. */
-        uint32_t vmm_flags = VMM_FLAG_PRESENT | VMM_FLAG_USER;
-        if (prot & PROT_WRITE) vmm_flags |= VMM_FLAG_WRITE;
-
-        /* Allocate + map. On mid-way OOM, unwind what we mapped so
-           far. Each freshly allocated frame is zeroed via its
-           identity mapping first — user code mmaps to a known-clean
-           page. */
-        for (uint32_t off = 0; off < length; off += PAGE_SIZE) {
-            uint32_t frame = pmm_alloc_frame();
-            if (!frame) {
-                for (uint32_t u = 0; u < off; u += PAGE_SIZE) {
-                    uint32_t f = vmm_get_physical_in(pd, addr + u) & 0xFFFFF000;
-                    vmm_unmap_in(pd, addr + u);
-                    if (f) pmm_free_frame(f);
-                }
-                regs->eax = (uint32_t)-1; return regs;
-            }
-            memset((void *)frame, 0, PAGE_SIZE);
-            vmm_map_in(pd, addr + off, frame, vmm_flags);
+        uint64_t flags = VMM_FLAG_USER;
+        if (prot & 0x2) flags |= VMM_FLAG_WRITE;
+        for (uint64_t va = addr; va < addr + len; va += PAGE_SIZE) {
+            uint64_t frame = pmm_alloc_frame();
+            if (!frame) { regs->rax = (uint64_t)(int64_t)-1; goto mmap_done; }
+            memset(phys_to_virt_low(frame), 0, PAGE_SIZE);
+            vmm_map_in(pml4, va, frame, flags);
         }
-
-        regs->eax = addr;
-        return regs;
+        regs->rax = addr;
+mmap_done:
+        break;
     }
 
     case SYS_MPROTECT: {
-        /* ebx=addr, ecx=length, edx=prot. Changes page permissions on
-           an already-mapped range. No-op on unmapped pages would leave
-           an inconsistent range, so we bail on the first gap. */
-        uint32_t addr   = regs->ebx;
-        uint32_t length = regs->ecx;
-        uint32_t prot   = regs->edx;
-
-        if (length == 0)                              { regs->eax = 0; return regs; }
-        if (addr & (PAGE_SIZE - 1))                   { regs->eax = (uint32_t)-1; return regs; }
-        if (length & (PAGE_SIZE - 1))                 { regs->eax = (uint32_t)-1; return regs; }
-        if (addr < 0x08000000u)                       { regs->eax = (uint32_t)-1; return regs; }
-        if (addr + length < addr)                     { regs->eax = (uint32_t)-1; return regs; }
-        if (addr + length > 0xC0000000u)              { regs->eax = (uint32_t)-1; return regs; }
-
-        uint32_t *pd = task_current_pd();
-        if (!pd) { regs->eax = (uint32_t)-1; return regs; }
-
-        uint32_t vmm_flags = VMM_FLAG_PRESENT | VMM_FLAG_USER;
-        if (prot & PROT_WRITE) vmm_flags |= VMM_FLAG_WRITE;
-
-        for (uint32_t off = 0; off < length; off += PAGE_SIZE) {
-            if (vmm_set_flags_in(pd, addr + off, vmm_flags) != 0) {
-                regs->eax = (uint32_t)-1; return regs;
-            }
+        uint64_t addr = a1 & ~(uint64_t)(PAGE_SIZE - 1);
+        uint64_t len  = (a2 + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+        uint64_t prot = a3;
+        uint64_t *pml4 = task_current_pml4();
+        if (!pml4) { regs->rax = (uint64_t)(int64_t)-1; break; }
+        uint64_t flags = VMM_FLAG_USER;
+        if (prot & 0x2) flags |= VMM_FLAG_WRITE;
+        int rc = 0;
+        for (uint64_t va = addr; va < addr + len; va += PAGE_SIZE) {
+            if (vmm_set_flags_in(pml4, va, flags) < 0) { rc = -1; break; }
         }
-        regs->eax = 0;
-        return regs;
+        regs->rax = (uint64_t)(int64_t)rc;
+        break;
     }
 
-    case SYS_UMOUNT: {
-        USER_PATH(regs->ebx, upath);
-        char rp[VFS_MAX_PATH];
-        if (process_resolve_path(upath, rp, sizeof rp) != 0) {
-            regs->eax = (uint32_t)-1; return regs;
-        }
-        int rc = vfs_umount(rp);
-        if (rc == 0) {
-            /* Keep lsblk honest: clear mount_path on any blkdev whose
-               mount_path matches this path. vfs_umount itself doesn't
-               know about blkdev bookkeeping. */
-            for (int i = 0; ; i++) {
-                blkdev_t *d = blkdev_nth(i);
-                if (!d) break;
-                if (strcmp(d->mount_path, rp) == 0) d->mount_path[0] = '\0';
-            }
-        }
-        regs->eax = (uint32_t)rc;
-        return regs;
+    case SYS_MOUNT: {
+        /* rdi=src, rsi=mountpoint, rdx=type, r10=flags */
+        uint64_t a4 = regs->r10;
+        const char *src   = (const char *)(uintptr_t)a1;
+        const char *mp    = (const char *)(uintptr_t)a2;
+        const char *type  = (const char *)(uintptr_t)a3;
+        const char *flags = a4 ? (const char *)(uintptr_t)a4 : "rw";
+        regs->rax = (uint64_t)(int64_t)fstab_do_mount(src, mp, type, flags);
+        break;
     }
 
-    case SYS_SIGRETURN: {
-        /* Restores regs in place from the per-process snapshot and
-           drops the delivering flag. eax is part of the restored frame
-           so the original syscall's return value is preserved. */
+    case SYS_UMOUNT:
+        regs->rax = (uint64_t)(int64_t)vfs_umount((const char *)(uintptr_t)a1);
+        if (regs->rax == 0) {
+            /* clear mount_path on the backing blkdev so lsblk shows
+               detached state. best-effort — the blkdev lookup is
+               by-mount-path which we don't store in vfs_mount, so
+               skip the back-clear for now. */
+        }
+        break;
+
+    case SYS_CHDIR: {
+        /* Resolve the user path through the current cwd + chroot,
+           then store as the new chroot-local cwd. Rejects anything
+           that isn't a directory. */
+        const char *path = (const char *)(uintptr_t)a1;
+        process_t *p = process_current();
+        if (!p) { regs->rax = (uint64_t)(int64_t)-1; break; }
+        char resolved[VFS_MAX_PATH];
+        if (process_resolve_path(path, resolved, sizeof resolved) < 0) {
+            regs->rax = (uint64_t)(int64_t)-1; break;
+        }
+        struct vfs_stat st;
+        if (vfs_stat(resolved, &st) != 0 || st.type != VFS_DIR) {
+            regs->rax = (uint64_t)(int64_t)-1; break;
+        }
+        /* Strip the chroot root so what we store is chroot-local.
+           resolved starts with p->root; skip that prefix. For an
+           unrooted process (p->root == "/"), no prefix to strip —
+           we keep the leading '/'. */
+        const char *root = p->root[0] ? p->root : "/";
+        int ri = 0;
+        if (root[0] == '/' && root[1] == 0) {
+            ri = 0;                 /* no chroot, keep full path */
+        } else {
+            while (root[ri] && resolved[ri] == root[ri]) ri++;
+            if (root[ri] != 0) { regs->rax = (uint64_t)(int64_t)-1; break; }
+        }
+        const char *tail = resolved + ri;
+        if (!*tail) tail = "/";
+        int k = 0;
+        while (tail[k] && k < VFS_MAX_PATH - 1) { p->cwd[k] = tail[k]; k++; }
+        p->cwd[k] = 0;
+        regs->rax = 0;
+        break;
+    }
+
+    case SYS_GETCWD: {
+        char *buf = (char *)(uintptr_t)a1;
+        uint64_t cap = a2;
+        process_t *p = process_current();
+        if (!p || !buf || cap == 0) { regs->rax = (uint64_t)(int64_t)-1; break; }
+        int n = 0;
+        while (p->cwd[n] && (uint64_t)n < cap - 1) { buf[n] = p->cwd[n]; n++; }
+        buf[n] = 0;
+        regs->rax = (uint64_t)n;
+        break;
+    }
+
+    case SYS_CHROOT: {
+        process_t *p = process_current();
+        if (!p) { regs->rax = (uint64_t)(int64_t)-1; break; }
+        const char *target = resolve_path((const char *)(uintptr_t)a1);
+        if (!target) { regs->rax = (uint64_t)(int64_t)-1; break; }
+        struct vfs_stat st;
+        if (vfs_stat(target, &st) != 0 || st.type != VFS_DIR) {
+            regs->rax = (uint64_t)(int64_t)-1; break;
+        }
+        int n = 0;
+        while (target[n] && n < VFS_MAX_PATH - 1) {
+            p->root[n] = target[n]; n++;
+        }
+        while (n > 1 && p->root[n-1] == '/') n--;
+        p->root[n] = 0;
+        p->cwd[0] = '/'; p->cwd[1] = 0;
+        regs->rax = 0;
+        break;
+    }
+
+    case SYS_KILL:
+        regs->rax = (uint64_t)(int64_t)process_kill((int32_t)a1, (int)a2);
+        break;
+
+    case SYS_SETPGID:
+        regs->rax = (uint64_t)(int64_t)process_setpgid((uint32_t)a1, (uint32_t)a2);
+        break;
+
+    case SYS_GETPGID:
+        regs->rax = process_getpgid((uint32_t)a1);
+        break;
+
+    case SYS_SIGNAL:
+        regs->rax = (uint64_t)process_signal((int)a1, a2);
+        break;
+
+    case SYS_SIGRETURN:
         process_sigreturn(regs);
+        /* regs has been rewritten to the saved user frame — no
+           further dispatch. */
         return regs;
+
+    case SYS_ALARM:
+        regs->rax = (uint64_t)process_set_alarm((uint32_t)a1);
+        break;
+
+    case SYS_PIPE: {
+        int pair[2];
+        int r = fd_pipe(pair);
+        if (r == 0 && a1) {
+            int *out = (int *)(uintptr_t)a1;
+            out[0] = pair[0]; out[1] = pair[1];
+        }
+        regs->rax = (uint64_t)(int64_t)r;
+        break;
     }
 
-    case SYS_TRACEME: {
-        /* Set/clear the single strace target. ebx = pid (0 to disable).
-           No permission check — any process can drive this. Reset
-           the ring pointer when enabling so the tracer sees its
-           capture start at seq=0. Disable (pid=0) leaves the ring
-           intact so the tracer can drain post-exit. */
-        if (regs->ebx != 0) trace_next_seq = 0;
-        trace_target_pid = regs->ebx;
-        regs->eax = 0;
-        return regs;
+    case SYS_FORK:
+        regs->rax = (uint64_t)(int64_t)process_fork(regs);
+        break;
+
+    case SYS_EXECVE: {
+        /* (path, argv, envp). Reads the ELF via vfs, unmaps the
+           caller's user image, loads the new one, rewrites regs. */
+        const char *upath = (const char *)(uintptr_t)a1;
+        char *const *argv = (char *const *)(uintptr_t)a2;
+        const char *path = resolve_path(upath);
+        if (!path) { regs->rax = (uint64_t)(int64_t)-1; break; }
+        /* Copy the resolved path into a stable kernel buffer — the
+           resolve_buf is static per-call and execve's user-stack
+           rebuild will issue more syscalls that stomp it. */
+        char kpath[VFS_MAX_PATH];
+        int ki = 0;
+        while (path[ki] && ki < VFS_MAX_PATH - 1) { kpath[ki] = path[ki]; ki++; }
+        kpath[ki] = 0;
+        struct vfs_stat st;
+        if (vfs_stat(kpath, &st) != 0 || st.size == 0) {
+            regs->rax = (uint64_t)(int64_t)-1; break;
+        }
+        void *buf = kmalloc_wrap(st.size);
+        if (!buf) { regs->rax = (uint64_t)(int64_t)-1; break; }
+        ssize_t r = vfs_read(kpath, buf, st.size, 0);
+        if (r != (ssize_t)st.size) {
+            kfree_wrap(buf);
+            regs->rax = (uint64_t)(int64_t)-1; break;
+        }
+        char *const *envp = (char *const *)(uintptr_t)a3;
+        int rc = process_execve_from_memory(regs, kpath, buf, st.size, argv, envp);
+        kfree_wrap(buf);
+        if (rc < 0) regs->rax = (uint64_t)(int64_t)-1;
+        /* Success: regs is already rewritten — when we return, the
+           stub iretq's into the new image at entry with the fresh
+           user stack we built. */
+        break;
     }
+
+    case SYS_READDIR: {
+        const char *p = resolve_path((const char *)(uintptr_t)a1);
+        if (!p) { regs->rax = (uint64_t)(int64_t)-1; break; }
+        char name[VFS_MAX_NAME];
+        uint32_t type = 0;
+        int r = vfs_readdir(p, (uint32_t)a2, name, &type);
+        if (r == 0 && a3) {
+            /* User passes {char name[VFS_MAX_NAME]; uint32_t type;} */
+            char *out = (char *)(uintptr_t)a3;
+            for (int i = 0; i < VFS_MAX_NAME; i++) out[i] = name[i];
+            *(uint32_t *)(out + VFS_MAX_NAME) = type;
+        }
+        regs->rax = (uint64_t)(int64_t)r;
+        break;
+    }
+
+    case SYS_SPAWN: {
+        /* Spawn a new process executing ELF at path `a1` with argv
+           `a2` (NULL-terminated). Returns child pid or -1. Uses the
+           same VFS-reading path as process_spawn_from_path, so it
+           covers ramfs + FAT alike. Detaches — no parent linkage. */
+        const char *p = resolve_path((const char *)(uintptr_t)a1);
+        char *const *argv = (char *const *)(uintptr_t)a2;
+        if (!p) { regs->rax = (uint64_t)(int64_t)-1; break; }
+        regs->rax = (uint64_t)(int64_t)process_spawn_from_path(p, argv);
+        break;
+    }
+
+    case SYS_TIME:
+        regs->rax = timer_get_ticks();
+        break;
+
+    case SYS_PS: {
+        struct proc_info *out = (struct proc_info *)(uintptr_t)a2;
+        regs->rax = (uint64_t)(int64_t)process_info_at((uint32_t)a1, out);
+        break;
+    }
+
+    case SYS_BLKDEVS: {
+        struct blkdev_info {
+            char     name[16];
+            uint32_t total_sectors;
+            char     mount_path[32];
+            char     fs_type[16];
+            uint32_t read_only;
+        } *out = (struct blkdev_info *)(uintptr_t)a2;
+        blkdev_t *dev = blkdev_nth((int)a1);
+        if (!dev) { regs->rax = (uint64_t)(int64_t)-1; break; }
+        for (int k = 0; k < 16; k++)  out->name[k]       = dev->name[k];
+        out->total_sectors = dev->total_sectors;
+        for (int k = 0; k < 32; k++) out->mount_path[k] = dev->mount_path[k];
+        for (int k = 0; k < 16; k++) out->fs_type[k]    = dev->fs_type[k];
+        out->read_only = dev->read_only;
+        regs->rax = 0;
+        break;
+    }
+
+    case SYS_TTY_RAW: {
+        serial_set_raw((int)a1);
+        regs->rax = 0;
+        break;
+    }
+
+    case SYS_TCSETPGRP: {
+        /* No ownership checks — we don't track a controlling tty per
+           process. The shell uses this to hand the terminal to
+           foreground pipelines and reclaim it on exit. */
+        process_set_foreground((uint32_t)a1);
+        regs->rax = 0;
+        break;
+    }
+
+    case SYS_TTY_POLL:
+        /* Non-blocking "is there a byte ready on the console?" test.
+           Userspace uses this to back off probes (CSI-6n) that might
+           never get answered AND for games like flappy to poll for
+           input without blocking. Checks BOTH rings — otherwise
+           PS/2 keystrokes on a VGA session go invisible. */
+        regs->rax = (serial_has_data() || keyboard_has_key()) ? 1 : 0;
+        break;
+
+    case SYS_VGA_TEXT:
+        /* Restore 80x25 text mode. The user-space framebuffer alias
+           that SYS_VGA_GFX set up stays mapped — harmless, the
+           process exits right after this in practice. */
+        vga_text_enter();
+        regs->rax = 0;
+        break;
+
+    case SYS_TTY_LASTSRC:
+        regs->rax = (uint64_t)console_last_input_src();
+        break;
+
+    case SYS_VGA_GFX: {
+        /* Switch to VGA mode 13h and alias the framebuffer at a
+           fixed user VA chosen by the caller (a1). No-ops if called
+           twice — the caller gets back the same VA either way.
+           Returns the user VA on success, -1 on failure. */
+        uint64_t user_va = a1 & ~0xFFFULL;
+        if (!user_va) { regs->rax = (uint64_t)(int64_t)-1; break; }
+        uint64_t *pml4 = task_current_pml4();
+        if (!pml4) { regs->rax = (uint64_t)(int64_t)-1; break; }
+        for (int i = 0; i < VGA_MODE13_PAGES; i++) {
+            vmm_map_in(pml4,
+                       user_va + (uint64_t)i * PAGE_SIZE,
+                       VGA_MODE13_PHYS + (uint64_t)i * PAGE_SIZE,
+                       VMM_FLAG_PRESENT | VMM_FLAG_WRITE | VMM_FLAG_USER);
+        }
+        vga_mode13_enter();
+        regs->rax = user_va;
+        break;
+    }
+
+    case SYS_TTY_WINSZ: {
+        /* op=0: get — fill *a2=rows, *a3=cols (uint16_t pointers).
+           op=1: set — a2=rows, a3=cols. Default 24x80 until something
+           probes via CSI-6n and writes back. */
+        uint64_t op = a1;
+        if (op == 0) {
+            uint16_t r, c;
+            serial_get_winsize(&r, &c);
+            if (a2) *(uint16_t *)(uintptr_t)a2 = r;
+            if (a3) *(uint16_t *)(uintptr_t)a3 = c;
+            regs->rax = 0;
+        } else {
+            serial_set_winsize((uint16_t)a2, (uint16_t)a3);
+            regs->rax = 0;
+        }
+        break;
+    }
+
+    case SYS_MEMINFO: {
+        struct meminfo {
+            uint64_t total_kb;
+            uint64_t free_kb;
+        } *out = (struct meminfo *)(uintptr_t)a1;
+        out->total_kb = (uint64_t)pmm_get_total_count() * 4u;   /* 4 KiB */
+        out->free_kb  = (uint64_t)pmm_get_free_count()  * 4u;
+        regs->rax = 0;
+        break;
+    }
+
+    case SYS_PEEK: {
+        /* Read `count` bytes of physical memory starting at `src` into
+           the user's `dst` buffer. Source must lie within the first
+           64 MiB (the HHDM window). Caps at 4 KiB per call to keep
+           the kernel from being used as a giant memcpy engine. */
+        uint64_t src   = a1;
+        uint64_t dst   = a2;
+        uint64_t count = a3;
+        const uint64_t HHDM_LIMIT = 0x4000000ULL;   /* 64 MiB */
+        const uint64_t PEEK_MAX   = 4096;
+        if (count == 0) { regs->rax = 0; break; }
+        if (count > PEEK_MAX || src + count < src ||
+            src + count > HHDM_LIMIT) {
+            regs->rax = (uint64_t)(int64_t)-1; break;
+        }
+        const uint8_t *k = (const uint8_t *)(KERNEL_HHDM_BASE + src);
+        uint8_t *u = (uint8_t *)(uintptr_t)dst;
+        for (uint64_t i = 0; i < count; i++) u[i] = k[i];
+        regs->rax = count;
+        break;
+    }
+
+    case SYS_PAGEMAP: {
+        /* Walk the current PML4 for user VA `a1` and fill *a2. */
+        struct pagemap_out *out = (struct pagemap_out *)(uintptr_t)a2;
+        if (!out) { regs->rax = (uint64_t)(int64_t)-1; break; }
+        uint64_t va = a1;
+        uint64_t *pml4 = task_current_pml4();
+        if (!pml4) { regs->rax = (uint64_t)(int64_t)-1; break; }
+
+        uint32_t i_pml4 = (uint32_t)((va >> 39) & 0x1FF);
+        uint32_t i_pdpt = (uint32_t)((va >> 30) & 0x1FF);
+        uint32_t i_pd   = (uint32_t)((va >> 21) & 0x1FF);
+        uint32_t i_pt   = (uint32_t)((va >> 12) & 0x1FF);
+
+        out->pml4_idx = i_pml4; out->pdpt_idx = i_pdpt;
+        out->pd_idx   = i_pd;   out->pt_idx   = i_pt;
+        out->pml4e = out->pdpte = out->pde = out->pte = out->phys = 0;
+
+        out->pml4e = pml4[i_pml4];
+        if (!(out->pml4e & VMM_FLAG_PRESENT)) { regs->rax = 0; break; }
+        uint64_t *pdpt = (uint64_t *)(uintptr_t)
+            (KERNEL_HHDM_BASE + (out->pml4e & 0x000FFFFFFFFFF000ULL));
+        out->pdpte = pdpt[i_pdpt];
+        if (!(out->pdpte & VMM_FLAG_PRESENT)) { regs->rax = 0; break; }
+        uint64_t *pd = (uint64_t *)(uintptr_t)
+            (KERNEL_HHDM_BASE + (out->pdpte & 0x000FFFFFFFFFF000ULL));
+        out->pde = pd[i_pd];
+        if (!(out->pde & VMM_FLAG_PRESENT)) { regs->rax = 0; break; }
+        uint64_t *pt = (uint64_t *)(uintptr_t)
+            (KERNEL_HHDM_BASE + (out->pde & 0x000FFFFFFFFFF000ULL));
+        out->pte = pt[i_pt];
+        if (out->pte & VMM_FLAG_PRESENT) {
+            out->phys = (out->pte & 0x000FFFFFFFFFF000ULL) | (va & 0xFFF);
+        }
+        regs->rax = 0;
+        break;
+    }
+
+    case SYS_REGIONS: {
+        /* Return the nth region reported by pmm_region_iter. */
+        struct region_out *out = (struct region_out *)(uintptr_t)a2;
+        if (!out) { regs->rax = (uint64_t)(int64_t)-1; break; }
+        regions_target = a1;
+        regions_seen   = 0;
+        regions_found  = 0;
+        pmm_region_iter(regions_collect_cb);
+        if (regions_found) {
+            *out = regions_result;
+            regs->rax = 0;
+        } else {
+            regs->rax = (uint64_t)(int64_t)-1;
+        }
+        break;
+    }
+
+    case SYS_SHUTDOWN:
+        kprintf("[kernel] shutdown requested by pid %u\n",
+                process_current() ? process_current()->pid : 0);
+        acpi_shutdown();
+        break;
+
+    case SYS_TRACEME:
+        /* Set/clear the global trace target. pid=0 disables. */
+        trace_target_pid = (uint32_t)a1;
+        if (trace_target_pid) trace_next_seq = 0;
+        regs->rax = 0;
+        break;
 
     case SYS_TRACE_READ: {
-        /* ebx = seq. If seq < trace_next_seq and still in the ring
-           window, copy into *ecx and return 0. Otherwise return -1
-           (caller retries or gives up). */
-        uint32_t seq = regs->ebx;
-        USER_STRUCT_OK(regs->ecx, struct strace_entry, 1);
-        if (seq >= trace_next_seq) { regs->eax = (uint32_t)-1; return regs; }
-        uint32_t oldest = trace_next_seq > STRACE_RING ?
-                          trace_next_seq - STRACE_RING : 0;
-        if (seq < oldest) { regs->eax = (uint32_t)-1; return regs; }
-        copy_to_user((void *)regs->ecx, &trace_ring[seq % STRACE_RING],
-                     sizeof(struct strace_entry));
-        regs->eax = 0;
-        return regs;
-    }
-
-    case SYS_SHUTDOWN: {
-        __asm__ volatile ("cli");
-        /* QEMU ACPI shutdown (i440fx/PIIX4, and older Bochs fallback) */
-        outw(0x604, 0x2000);
-        outw(0xB004, 0x2000);
-        for (;;) __asm__ volatile ("hlt");
+        /* rdi=seq, rsi=*out.  Returns 0 on success, -1 past EOF. */
+        uint32_t seq = (uint32_t)a1;
+        if (seq >= trace_next_seq) { regs->rax = (uint64_t)(int64_t)-1; break; }
+        if (trace_next_seq - seq > STRACE_RING) { regs->rax = (uint64_t)(int64_t)-1; break; }
+        struct strace_entry *src = &trace_ring[seq % STRACE_RING];
+        if (a2) *(struct strace_entry *)(uintptr_t)a2 = *src;
+        regs->rax = 0;
+        break;
     }
 
     default:
-        serial_printf("[syscall] unknown syscall %u\n", num);
-        regs->eax = (uint32_t)-1;
-        return regs;
+        kprintf("[syscall] unknown %lu from pid %u\n", num,
+                process_current() ? process_current()->pid : 0);
+        regs->rax = (uint64_t)(int64_t)-1;
+        break;
     }
+
+    /* Stamp the trace entry's return value now that the dispatcher
+       has filled regs->rax. SYS_SIGRETURN returns early above — we
+       don't record its ret. Same for SYS_EXIT since the process is
+       already dead. */
+    if (__traced && num != SYS_SIGRETURN && num != SYS_EXIT) {
+        if (__entry_pos < trace_next_seq) {
+            trace_ring[__entry_pos % STRACE_RING].ret = (int64_t)regs->rax;
+        }
+    }
+
+    /* The interrupt path delivers pending signals from isr_handler's
+       tail, but SYSCALL bypasses that. Hook it in here so a signal
+       queued by e.g. self-kill is picked up on the same hop back to
+       user space. SYS_SIGRETURN is the one case we must skip — regs
+       has just been reloaded from sig_saved_regs and redelivering
+       would clobber it. */
+    if (num != SYS_SIGRETURN) process_deliver_pending_signals(regs);
+    return regs;
 }
 
-/* Entry point for int 0x80. Every exit path runs through the pending-
-   signal hook so a queued SIGINT (or anything else with a user handler)
-   is delivered on the iret back to ring 3. SYS_SIGRETURN already
-   rewrote regs to the pre-handler snapshot — the hook's sig_delivering
-   guard was cleared there, so follow-up pending signals can be
-   delivered on the next syscall without stacking. */
-static registers_t *syscall_handler(registers_t *regs) {
-    /* Snapshot entry registers so the strace recorder can see the
-       original syscall number + args even after the dispatcher has
-       clobbered eax with a return value. */
-    uint32_t num = regs->eax;
-    uint32_t a1  = regs->ebx, a2 = regs->ecx, a3 = regs->edx, a4 = regs->esi;
-    process_t *caller = process_current();
-    uint32_t pid = caller ? caller->pid : 0;
+/* SYSCALL/SYSRET-class MSRs. Values are the CPU-fixed numbers. */
+#define MSR_EFER            0xC0000080ULL
+#define MSR_STAR            0xC0000081ULL
+#define MSR_LSTAR           0xC0000082ULL
+#define MSR_CSTAR           0xC0000083ULL
+#define MSR_FMASK           0xC0000084ULL
+#define EFER_SCE            (1ULL << 0)
 
-    registers_t *out = syscall_dispatch(regs);
+extern void syscall_entry_64(void);
+extern uint64_t syscall_kernel_rsp;   /* from syscall_entry.s */
 
-    /* Record AFTER dispatch so we get the return value. SYS_TRACEME/
-       SYS_TRACE_READ themselves are recorded too — harmless and lets
-       the tracer see its own enable call. */
-    if (trace_target_pid && pid == trace_target_pid) {
-        trace_record(pid, num, a1, a2, a3, a4, (int32_t)out->eax);
-    }
+static inline uint64_t rdmsr(uint32_t msr) {
+    uint32_t lo, hi;
+    __asm__ volatile ("rdmsr" : "=a"(lo), "=d"(hi) : "c"(msr));
+    return ((uint64_t)hi << 32) | lo;
+}
+static inline void wrmsr(uint32_t msr, uint64_t val) {
+    uint32_t lo = (uint32_t)val, hi = (uint32_t)(val >> 32);
+    __asm__ volatile ("wrmsr" :: "a"(lo), "d"(hi), "c"(msr));
+}
 
-    process_deliver_pending_signals(out);
-    return out;
+void syscall_set_kernel_stack(uint64_t rsp) {
+    syscall_kernel_rsp = rsp;
 }
 
 void syscall_init(void) {
+    /* Keep INT 0x80 registered as a debuggable fallback. Real user
+       code goes through the SYSCALL MSRs below. */
     isr_register_handler(0x80, syscall_handler);
-    serial_printf("[syscall] Handler registered at int 0x80\n");
+
+    /* Enable the SYSCALL/SYSRET instruction pair via EFER.SCE. */
+    wrmsr(MSR_EFER, rdmsr(MSR_EFER) | EFER_SCE);
+
+    /* STAR layout matched to gdt.c:
+         [47:32] = 0x08 → kernel CS; kernel SS is implicit at CS+8 (0x10).
+         [63:48] = 0x18 → on sysretq CPU sets CS = 0x18+16 | 3 = 0x2B,
+                            SS = 0x18+8 | 3 = 0x23.
+       Low 32 bits are unused in long mode. */
+    wrmsr(MSR_STAR, (0x08ULL << 32) | (0x18ULL << 48));
+
+    /* Handler RIP. */
+    wrmsr(MSR_LSTAR, (uint64_t)(uintptr_t)&syscall_entry_64);
+
+    /* Clear IF,DF,TF on syscall entry — keeps interrupts off while
+       the entry stub swaps stacks, strips direction-flag state. */
+    wrmsr(MSR_FMASK, 0x200 | 0x400 | 0x100);
+
+    /* CSTAR is the compat-mode entry; we don't support it. Point at
+       a safe stub (same as LSTAR) so a stray sysenter from compat
+       mode doesn't dispatch through garbage. */
+    wrmsr(MSR_CSTAR, (uint64_t)(uintptr_t)&syscall_entry_64);
+
+    /* Initial kernel stack (the boot stack). task_init/schedule will
+       override via syscall_set_kernel_stack once processes exist. */
+    extern uint8_t stack_top[];
+    syscall_kernel_rsp = (uint64_t)(uintptr_t)stack_top;
 }

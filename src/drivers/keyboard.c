@@ -104,6 +104,18 @@ static registers_t *keyboard_callback(registers_t *regs) {
     }
 
     if (c) {
+        /* Normalize CR→LF and DEL→BS so console_read's cook path
+           sees the same bytes regardless of which input source
+           delivered them. */
+        if (c == '\r') c = '\n';
+        if (c == 0x7F) c = '\b';
+        /* Ctrl-C / Ctrl-Z: route to foreground group before enqueue,
+           matching the serial ISR path. Without this, PS/2-entered
+           signals never reach user space. */
+        extern void process_kill_foreground(void);
+        extern void process_stop_foreground(void);
+        if (c == 0x03) { process_kill_foreground(); return regs; }
+        if (c == 0x1A) { process_stop_foreground(); return regs; }
         kbd_enqueue(c);
     }
     return regs;

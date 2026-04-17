@@ -1,112 +1,75 @@
-/* runtests [<dir>]: walk dir for *.vsh files, spawn /bin/shell on
-   each with stdout captured. Forward captured output to our own
-   stdout AND scan lines for PASS / FAIL prefixes for a tally. Default
-   dir is /tests. Exit code is non-zero if any FAIL was seen. */
+/* runtests [dir] — walk `dir` (default /tests) for *.vsh files,
+ * spawn /bin/shell on each, tally the PASS/FAIL assertion lines
+ * emitted by `assert` in the scripts, then sys_shutdown.
+ *
+ * The host-side harness greps for "=== Summary:" to decide success.
+ * Each script writes its own PASS/FAIL lines directly to stdout;
+ * runtests doesn't intercept shell's output (no pipes yet), so the
+ * summary is derived from shell exit codes: 0 = all asserts passed,
+ * non-zero = at least one FAILed.
+ */
 
-#include "syscall.h"
-#include "ulib.h"
+#include "ulib_x64.h"
 
-static int has_vsh_suffix(const char *name) {
-    int n = 0;
-    while (name[n]) n++;
-    if (n < 5) return 0;  /* need at least "a.vsh" */
-    return name[n - 4] == '.' && name[n - 3] == 'v' &&
-           name[n - 2] == 's' && name[n - 1] == 'h';
+struct readdir_out {
+    char name[64];
+    uint32_t type;
+};
+
+static int has_vsh(const char *name) {
+    int n = 0; while (name[n]) n++;
+    if (n < 5) return 0;
+    return name[n-4] == '.' && name[n-3] == 'v' &&
+           name[n-2] == 's' && name[n-1] == 'h';
 }
 
-static void join(char *out, int cap, const char *a, const char *b) {
-    int oi = 0;
-    int need_sep = 1;
-    while (*a && oi < cap - 1) {
-        out[oi++] = *a;
-        need_sep = (*a != '/');
-        a++;
-    }
-    if (need_sep && oi < cap - 1) out[oi++] = '/';
-    while (*b && oi < cap - 1) out[oi++] = *b++;
-    out[oi] = '\0';
+static int run_script(const char *dir, const char *name) {
+    char path[128];
+    int p = 0;
+    while (dir[p] && p < (int)sizeof(path) - 1) { path[p] = dir[p]; p++; }
+    if (p > 0 && path[p-1] != '/' && p < (int)sizeof(path) - 1) path[p++] = '/';
+    for (int i = 0; name[i] && p < (int)sizeof(path) - 1; i++) path[p++] = name[i];
+    path[p] = 0;
+
+    char *argv[] = { (char *)"shell", path, 0 };
+    long pid = sys_fork();
+    if (pid == 0) { sys_execve("/bin/shell", argv, 0); sys_exit(127); }
+    if (pid < 0) return -1;
+    int status = 0;
+    sys_waitpid((int)pid, &status);
+    return status;
 }
 
-static int line_starts_with(const char *line, int len, const char *pfx) {
-    int i = 0;
-    while (pfx[i]) {
-        if (i >= len || line[i] != pfx[i]) return 0;
-        i++;
-    }
-    return 1;
-}
+int main(int argc, char **argv, char **envp) {
+    (void)envp;
+    const char *dir = (argc > 1) ? argv[1] : "/tests";
 
-/* Run one test. Returns 1 on any FAIL line in its output, 0 otherwise.
-   Also updates *pass_out / *fail_out with per-line counts. */
-static int run_one(const char *path, int *pass_out, int *fail_out) {
-    int pipe_fds[2];
-    if (sys_pipe(pipe_fds) < 0) { puts("runtests: pipe() failed\n"); return 1; }
-
-    /* Save our stdout, install pipe write end, spawn, restore. */
-    int saved_out = sys_dup2(1, 12);
-    sys_dup2(pipe_fds[1], 1);
-
-    char *child_argv[] = { "/bin/shell", (char *)path, 0 };
-    int pid = sys_spawn("/bin/shell", child_argv);
-
-    sys_dup2(saved_out, 1); sys_close(saved_out);
-    sys_close(pipe_fds[1]);
-
-    if (pid < 0) {
-        sys_close(pipe_fds[0]);
-        printf("runtests: cannot spawn shell for %s\n", path);
-        return 1;
-    }
-
-    /* Drain the pipe: echo to our real stdout, scan for PASS/FAIL. */
-    char buf[1024];
-    char line[512];
-    int line_len = 0;
-    int saw_fail = 0;
-    int32_t n;
-    while ((n = sys_read(pipe_fds[0], buf, sizeof buf)) > 0) {
-        sys_write(1, buf, n);
-        for (int i = 0; i < n; i++) {
-            char c = buf[i];
-            if (c == '\n') {
-                if (line_starts_with(line, line_len, "PASS")) (*pass_out)++;
-                else if (line_starts_with(line, line_len, "FAIL")) {
-                    (*fail_out)++; saw_fail = 1;
-                }
-                line_len = 0;
-            } else if (line_len < (int)sizeof line - 1) {
-                line[line_len++] = c;
-            }
-        }
-    }
-    sys_close(pipe_fds[0]);
-    sys_waitpid(pid, 0);
-    return saw_fail;
-}
-
-int main(int argc, char **argv) {
-    const char *dir = (argc >= 2) ? argv[1] : "/tests";
-
-    /* Ensure /scratch exists for tests to use. Ignore "already
-       exists" — tests will complain about real problems. */
+    /* Ensure /scratch exists; tests stash intermediate files there. */
     sys_mkdir("/scratch");
 
-    int tests = 0, pass = 0, fail = 0;
-    char name[VFS_MAX_NAME];
-    uint32_t type;
-    for (uint32_t idx = 0; sys_readdir(dir, idx, name, &type) == 0; idx++) {
-        if (name[0] == '.') continue;
-        if (type != VFS_FILE) continue;
-        if (!has_vsh_suffix(name)) continue;
-
-        char path[VFS_MAX_PATH];
-        join(path, sizeof path, dir, name);
-
-        printf("=== %s ===\n", name);
-        tests++;
-        run_one(path, &pass, &fail);
+    int passed = 0, failed = 0;
+    struct readdir_out e;
+    uint32_t idx = 0;
+    while (_syscall3(SYS_READDIR, (long)(uintptr_t)dir, idx, (long)(uintptr_t)&e) == 0) {
+        idx++;
+        if (!has_vsh(e.name)) continue;
+        u_puts_n("=== RUN "); u_puts_n(e.name); u_putc('\n');
+        int s = run_script(dir, e.name);
+        if (s == 0) {
+            u_puts_n("=== OK  "); u_puts_n(e.name); u_putc('\n');
+            passed++;
+        } else {
+            u_puts_n("=== FAIL "); u_puts_n(e.name);
+            u_puts_n(" status="); u_putdec(s); u_putc('\n');
+            failed++;
+        }
     }
 
-    printf("=== Summary: %d tests, %d PASS, %d FAIL ===\n", tests, pass, fail);
-    return fail > 0 ? 1 : 0;
+    u_puts_n("=== Summary: ");
+    u_putdec(passed);
+    u_puts_n(" passed, ");
+    u_putdec(failed);
+    u_puts_n(" failed\n");
+    sys_shutdown();
+    return failed ? 1 : 0;
 }

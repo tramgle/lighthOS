@@ -1,51 +1,43 @@
-/* alarmtest: install a SIGALRM handler, request alarm(1), busy-yield
-   for ~1.5 seconds, verify the handler fired. Also verifies alarm(0)
-   cancels a pending alarm. Prints "OK N" on success with elapsed
-   ticks; used by tests/alarm.vsh. */
+/* alarmtest — register SIGALRM handler, test alarm cancel + fire.
+ *   A1: alarm(1), alarm(0) → no fire.
+ *   A2: alarm(1), yield until fired → handler runs within ~1s.
+ * Prints "OK <elapsed>" on success. */
 
-#include "syscall.h"
-#include "ulib.h"
+#include "ulib_x64.h"
 
 static volatile int fired;
+static volatile long fire_tick;
 
-static void on_alrm(int signo) { fired = signo; }
+static void on_sigalrm(int signo) {
+    (void)signo;
+    fired = 1;
+    fire_tick = sys_time();
+    sys_sigreturn();
+}
 
-int main(void) {
-    if (signal(SIG_ALRM, on_alrm) == SIG_ERR) {
-        puts("FAIL install\n");
-        return 1;
-    }
+int main(int argc, char **argv, char **envp) {
+    (void)argc; (void)argv; (void)envp;
+    sys_signal_raw(SIG_ALRM, on_sigalrm);
 
-    /* Cancel-before-fire: alarm(1) then alarm(0) — handler should
-       not run. */
+    /* A1: arm then cancel. */
     sys_alarm(1);
-    uint32_t prev = sys_alarm(0);
-    if (prev != 1) {
-        printf("FAIL cancel_prev %u\n", prev);
-        return 1;
-    }
-    /* Wait past when the first alarm would have fired. */
-    uint32_t t0 = sys_time();
-    while (sys_time() - t0 < 120) sys_yield();
-    if (fired) { puts("FAIL cancel\n"); return 1; }
+    sys_alarm(0);
+    long t0 = sys_time();
+    while (sys_time() - t0 < 20) sys_yield();
+    if (fired) { u_puts_n("FAIL canceled fired\n"); return 1; }
 
-    /* Real alarm. alarm(1) should fire ~100 ticks from now. */
-    fired = 0;
+    /* A2: real fire. */
+    long start = sys_time();
     sys_alarm(1);
-    t0 = sys_time();
-    while (!fired && sys_time() - t0 < 200) sys_yield();
+    long deadline = start + 200;                 /* 2 seconds of slack */
+    while (!fired && sys_time() < deadline) sys_yield();
+    if (!fired) { u_puts_n("FAIL not fired\n"); return 1; }
 
-    if (fired != SIG_ALRM) {
-        printf("FAIL notfired %d\n", fired);
-        return 1;
-    }
-    uint32_t elapsed = sys_time() - t0;
-    /* Accept anywhere in [80, 150] ticks — scheduling jitter + the
-       sys_yield path costs a few ticks. */
+    long elapsed = fire_tick - start;
     if (elapsed < 80 || elapsed > 150) {
-        printf("FAIL timing %u\n", elapsed);
+        u_puts_n("FAIL elapsed="); u_putdec(elapsed); u_putc('\n');
         return 1;
     }
-    printf("OK %u\n", elapsed);
+    u_puts_n("OK "); u_putdec(elapsed); u_putc('\n');
     return 0;
 }

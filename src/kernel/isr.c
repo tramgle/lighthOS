@@ -1,8 +1,9 @@
 #include "kernel/isr.h"
 #include "kernel/pic.h"
-#include "kernel/debug.h"
 #include "lib/kprintf.h"
 #include "kernel/panic.h"
+
+extern void process_deliver_pending_signals(registers_t *regs);
 
 static isr_handler_t handlers[256];
 
@@ -40,34 +41,31 @@ static void dump_exception(registers_t *regs) {
     if (regs->int_no < sizeof(exception_names) / sizeof(exception_names[0])) {
         name = exception_names[regs->int_no];
     }
-
     bool from_user = (regs->cs & 3) == 3;
 
-    kprintf("\nException: %s (#%u) err=0x%x eip=0x%x\n",
-            name, regs->int_no, regs->err_code, regs->eip);
+    kprintf("\nException: %s (#%lu) err=0x%lx rip=0x%lx\n",
+            name, regs->int_no, regs->err_code, regs->rip);
 
     if (regs->int_no == 14) {
-        uint32_t cr2;
+        uint64_t cr2;
         __asm__ volatile ("mov %%cr2, %0" : "=r"(cr2));
-        kprintf("  CR2=0x%x  (P=%u W=%u U=%u)\n",
-                cr2,
-                (regs->err_code >> 0) & 1,
-                (regs->err_code >> 1) & 1,
-                (regs->err_code >> 2) & 1);
+        kprintf("  CR2=0x%lx  (P=%u W=%u U=%u)\n", cr2,
+                (uint32_t)((regs->err_code >> 0) & 1),
+                (uint32_t)((regs->err_code >> 1) & 1),
+                (uint32_t)((regs->err_code >> 2) & 1));
     }
 
-    kprintf("  eax=0x%x ebx=0x%x ecx=0x%x edx=0x%x\n",
-            regs->eax, regs->ebx, regs->ecx, regs->edx);
-    kprintf("  esi=0x%x edi=0x%x ebp=0x%x esp=0x%x\n",
-            regs->esi, regs->edi, regs->ebp, regs->esp);
-    kprintf("  cs=0x%x ds=0x%x eflags=0x%x\n",
-            regs->cs, regs->ds, regs->eflags);
-
-    if (from_user) {
-        kprintf("  ss=0x%x useresp=0x%x  (ring 3)\n", regs->ss, regs->useresp);
-    } else {
-        debug_backtrace(regs->ebp);
-    }
+    kprintf("  rax=0x%lx rbx=0x%lx rcx=0x%lx rdx=0x%lx\n",
+            regs->rax, regs->rbx, regs->rcx, regs->rdx);
+    kprintf("  rsi=0x%lx rdi=0x%lx rbp=0x%lx rsp=0x%lx\n",
+            regs->rsi, regs->rdi, regs->rbp, regs->rsp);
+    kprintf("  r8 =0x%lx r9 =0x%lx r10=0x%lx r11=0x%lx\n",
+            regs->r8, regs->r9, regs->r10, regs->r11);
+    kprintf("  r12=0x%lx r13=0x%lx r14=0x%lx r15=0x%lx\n",
+            regs->r12, regs->r13, regs->r14, regs->r15);
+    kprintf("  cs=0x%lx ss=0x%lx rflags=0x%lx  (%s)\n",
+            regs->cs, regs->ss, regs->rflags,
+            from_user ? "ring 3" : "ring 0");
 }
 
 registers_t *isr_handler(registers_t *regs) {
@@ -80,10 +78,15 @@ registers_t *isr_handler(registers_t *regs) {
         panic("Unhandled CPU exception");
     }
 
-    /* Send EOI for hardware IRQs */
     if (regs->int_no >= 32 && regs->int_no < 48) {
-        pic_send_eoi(regs->int_no - 32);
+        pic_send_eoi((uint8_t)(regs->int_no - 32));
     }
+
+    /* Deliver any pending user-space signal. Runs for every
+       interrupt return, so a SIGALRM queued by the timer IRQ or
+       a SIGINT queued by SYS_KILL is picked up on the next hop
+       back to ring 3. No-op for kernel-mode frames. */
+    process_deliver_pending_signals(ret);
 
     return ret;
 }

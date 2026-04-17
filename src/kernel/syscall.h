@@ -45,6 +45,13 @@
 #define SYS_TRACE_READ  232
 #define SYS_MMAP_ANON   9
 #define SYS_MPROTECT    125
+#define SYS_TTY_RAW     54   /* 0 = cooked (default), 1 = raw. */
+#define SYS_TCSETPGRP   55   /* Set terminal foreground pgid. */
+#define SYS_TTY_WINSZ   56   /* op=0 get, op=1 set. See dispatch. */
+#define SYS_TTY_POLL    58   /* 1 = input byte pending, 0 = nothing. */
+#define SYS_VGA_GFX     60   /* Enter mode 13h + map FB; return user VA. */
+#define SYS_VGA_TEXT    61   /* Back to 80x25 text mode. */
+#define SYS_TTY_LASTSRC 62   /* 0 none, 1 serial, 2 keyboard (last read). */
 
 /* mmap/mprotect protection flags. PROT_EXEC is documented but not
    enforced — our paging setup has no NX bit at the i386 level. */
@@ -53,6 +60,31 @@
 #define PROT_EXEC    0x4
 
 #define SYSCALL_MAX 256
+
+/* SYS_PAGEMAP output. For a given user VA, reports each level's
+   index + the raw PTE-ish entry at that level + the final physical
+   address (or 0 if not mapped). On x86_64 we have 4 levels, so
+   pml4/pdpt/pd/pt all appear. */
+struct pagemap_out {
+    uint32_t pml4_idx;
+    uint32_t pdpt_idx;
+    uint32_t pd_idx;
+    uint32_t pt_idx;
+    uint64_t pml4e;
+    uint64_t pdpte;
+    uint64_t pde;
+    uint64_t pte;
+    uint64_t phys;
+};
+
+/* SYS_REGIONS output. One physical region from the PMM's ranged view.
+   Caller invokes with idx=0, 1, 2, ... until syscall returns -1. */
+struct region_out {
+    uint64_t start_addr;
+    uint64_t end_addr;
+    uint32_t used;
+    uint32_t _pad;
+};
 
 void syscall_init(void);
 

@@ -1,7 +1,6 @@
 #include "fs/fstab.h"
 #include "fs/vfs.h"
 #include "fs/blkdev.h"
-#include "fs/simplefs.h"
 #include "fs/fat.h"
 #include "mm/heap.h"
 #include "lib/string.h"
@@ -54,10 +53,7 @@ static int apply_entry(const char *source, const char *mountpoint,
     vfs_ops_t *ops = NULL;
     const char *fs_descr = type;
 
-    if (strcmp(type, "simplefs") == 0) {
-        root = simplefs_mount(dev);
-        ops = simplefs_get_ops();
-    } else if (strcmp(type, "fat") == 0 || strcmp(type, "fat16") == 0 ||
+    if (strcmp(type, "fat") == 0 || strcmp(type, "fat16") == 0 ||
                strcmp(type, "fat32") == 0) {
         root = fat_mount(dev);
         ops = fat_get_ops();

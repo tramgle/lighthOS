@@ -10,6 +10,27 @@
 static char serial_buffer[SERIAL_BUF_SIZE];
 static volatile uint32_t serial_read_idx;
 static volatile uint32_t serial_write_idx;
+static int serial_raw_mode;     /* 1 = caller does its own echo + line editing */
+
+void serial_set_raw(int enable) { serial_raw_mode = enable ? 1 : 0; }
+int  serial_get_raw(void)       { return serial_raw_mode; }
+
+/* Terminal window size cache. Userspace probes via CSI-6n and calls
+   serial_set_winsize to update. Defaults to the historical 24×80
+   minimum — programs that read this before anyone has probed get a
+   sane-but-conservative answer. */
+static uint16_t win_rows = 24;
+static uint16_t win_cols = 80;
+
+void serial_get_winsize(uint16_t *rows, uint16_t *cols) {
+    if (rows) *rows = win_rows;
+    if (cols) *cols = win_cols;
+}
+
+void serial_set_winsize(uint16_t rows, uint16_t cols) {
+    if (rows > 0) win_rows = rows;
+    if (cols > 0) win_cols = cols;
+}
 
 static int serial_is_transmit_empty(void) {
     return inb(SERIAL_COM1 + 5) & 0x20;
@@ -125,6 +146,9 @@ static registers_t *serial_callback(registers_t *regs) {
 
         if (c == '\r') c = '\n';
         if (c == 0x7F) c = '\b';
+
+        /* Echo + line editing live in console_read now (so PS/2 input
+           gets the same cooking). The ISR just queues the raw byte. */
         serial_enqueue(c);
     }
     return regs;
@@ -173,8 +197,13 @@ bool serial_has_data(void) {
 }
 
 char serial_getchar(void) {
+    /* Syscall entry clears IF (via IA32_FMASK, matching the INT-gate
+       behavior of INT 0x80). Bare `hlt` with IF=0 would wait for an
+       NMI, so the UART IRQ could never wake us. `sti; hlt` is the
+       standard atomic re-enable-and-wait pair — IF flips on just
+       before the halt so any pending IRQ fires immediately. */
     while (!serial_has_data()) {
-        __asm__ volatile ("hlt");
+        __asm__ volatile ("sti; hlt; cli");
     }
     char c = serial_buffer[serial_read_idx];
     serial_read_idx = (serial_read_idx + 1) % SERIAL_BUF_SIZE;

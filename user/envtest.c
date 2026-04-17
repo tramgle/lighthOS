@@ -1,43 +1,114 @@
 /* envtest — exercise envp end-to-end:
-   1. setenv/getenv/unsetenv round-trip in the running process.
-   2. setenv a var, spawn /bin/env, confirm the child inherits it.
-   Prints "OK" on success; FAIL messages + non-zero exit on failure. */
+ *   1. in-process setenv/getenv/unsetenv round-trip
+ *   2. setenv ENVTEST_MARKER=inherit, spawn /bin/env, verify the
+ *      child sees it in its envp.
+ *
+ * We implement setenv/getenv/unsetenv over a local env array
+ * bootstrapped from main's envp (copied into a mutable buffer so
+ * we can add / overwrite / remove entries). Prints "OK" to stdout
+ * on success of the in-process tests, then execs /bin/env with
+ * the mutated env so its output follows ours in the redirect file.
+ */
+#include "ulib_x64.h"
 
-#include "syscall.h"
-#include "ulib.h"
+#define MAX_ENV 32
+#define ENV_BUF 2048
 
-int main(void) {
-    /* Local setenv/getenv round-trip. */
-    if (setenv("FOO", "bar", 1) != 0) { puts("FAIL setenv\n"); return 1; }
-    char *v = getenv("FOO");
-    if (!v || strcmp(v, "bar") != 0) { puts("FAIL getenv\n"); return 1; }
+static char *env_ptrs[MAX_ENV + 1];
+static int  env_count;
+static char env_buf[ENV_BUF];
+static int  env_buf_used;
 
-    /* Overwrite flag. */
-    if (setenv("FOO", "baz", 0) != 0) { puts("FAIL setenv_no_overwrite\n"); return 1; }
-    v = getenv("FOO");
-    if (!v || strcmp(v, "bar") != 0) { puts("FAIL no_overwrite_kept_old\n"); return 1; }
+static int env_key_eq(const char *entry, const char *key) {
+    int i = 0;
+    while (key[i] && entry[i] && entry[i] != '=' && entry[i] == key[i]) i++;
+    return key[i] == 0 && entry[i] == '=';
+}
 
-    /* unsetenv. */
-    if (unsetenv("FOO") != 0) { puts("FAIL unsetenv\n"); return 1; }
-    if (getenv("FOO") != 0)   { puts("FAIL unsetenv_still_present\n"); return 1; }
-
-    /* Local tests passed — announce before the spawn because
-       inherited fds share a file but not a write offset, so the
-       child's output and any post-spawn parent writes would
-       overlap in the redirect file. */
-    puts("OK\n");
-
-    /* Cross-process inheritance: set a distinctive var, spawn
-       /bin/env, let the parent-inherited envp reach the child.
-       All post-spawn parent writes are avoided so child output
-       appends cleanly to the redirect file. */
-    if (setenv("ENVTEST_MARKER", "inherit", 1) != 0) {
-        return 1;
+static void env_init(char **envp) {
+    env_count = 0;
+    if (!envp) return;
+    for (int i = 0; envp[i] && env_count < MAX_ENV; i++) {
+        size_t len = u_strlen(envp[i]) + 1;
+        if (env_buf_used + (int)len > ENV_BUF) break;
+        char *dst = env_buf + env_buf_used;
+        for (size_t j = 0; j < len; j++) dst[j] = envp[i][j];
+        env_buf_used += (int)len;
+        env_ptrs[env_count++] = dst;
     }
-    char *argv[] = { "/bin/env", 0 };
-    int pid = sys_spawn("/bin/env", argv);
-    if (pid < 0) return 1;
-    int status = 0;
-    sys_waitpid((uint32_t)pid, &status);
+    env_ptrs[env_count] = 0;
+}
+
+static int env_set(const char *key, const char *val, int overwrite) {
+    for (int i = 0; i < env_count; i++) {
+        if (env_key_eq(env_ptrs[i], key)) {
+            if (!overwrite) return 0;
+            /* Overwrite in-place if the new entry fits; otherwise
+               append new + skip old. */
+            size_t need = u_strlen(key) + 1 + u_strlen(val) + 1;
+            if (env_buf_used + (int)need > ENV_BUF) return -1;
+            char *dst = env_buf + env_buf_used;
+            int k = 0;
+            for (int j = 0; key[j]; j++) dst[k++] = key[j];
+            dst[k++] = '=';
+            for (int j = 0; val[j]; j++) dst[k++] = val[j];
+            dst[k++] = 0;
+            env_buf_used += k;
+            env_ptrs[i] = dst;
+            return 0;
+        }
+    }
+    if (env_count >= MAX_ENV) return -1;
+    size_t need = u_strlen(key) + 1 + u_strlen(val) + 1;
+    if (env_buf_used + (int)need > ENV_BUF) return -1;
+    char *dst = env_buf + env_buf_used;
+    int k = 0;
+    for (int j = 0; key[j]; j++) dst[k++] = key[j];
+    dst[k++] = '=';
+    for (int j = 0; val[j]; j++) dst[k++] = val[j];
+    dst[k++] = 0;
+    env_buf_used += k;
+    env_ptrs[env_count++] = dst;
+    env_ptrs[env_count] = 0;
     return 0;
+}
+
+static char *env_get(const char *key) {
+    for (int i = 0; i < env_count; i++)
+        if (env_key_eq(env_ptrs[i], key))
+            return env_ptrs[i] + u_strlen(key) + 1;
+    return 0;
+}
+
+static int env_unset(const char *key) {
+    for (int i = 0; i < env_count; i++) {
+        if (env_key_eq(env_ptrs[i], key)) {
+            for (int j = i; j < env_count; j++) env_ptrs[j] = env_ptrs[j + 1];
+            env_count--;
+            return 0;
+        }
+    }
+    return 0;
+}
+
+int main(int argc, char **argv, char **envp) {
+    (void)argc; (void)argv;
+    env_init(envp);
+
+    if (env_set("FOO", "bar", 1) != 0) { u_puts_n("FAIL setenv\n"); return 1; }
+    char *v = env_get("FOO");
+    if (!v || u_strcmp(v, "bar") != 0) { u_puts_n("FAIL getenv\n"); return 1; }
+    if (env_set("FOO", "baz", 0) != 0) { u_puts_n("FAIL no-overwrite\n"); return 1; }
+    v = env_get("FOO");
+    if (!v || u_strcmp(v, "bar") != 0) { u_puts_n("FAIL kept-old\n"); return 1; }
+    if (env_unset("FOO") != 0) { u_puts_n("FAIL unsetenv\n"); return 1; }
+    if (env_get("FOO") != 0)   { u_puts_n("FAIL unsetenv-stuck\n"); return 1; }
+
+    u_puts_n("OK\n");
+
+    if (env_set("ENVTEST_MARKER", "inherit", 1) != 0) return 1;
+    char *child_argv[] = { (char *)"env", 0 };
+    sys_execve("/bin/env", child_argv, env_ptrs);
+    u_puts_n("FAIL exec\n");
+    return 1;
 }

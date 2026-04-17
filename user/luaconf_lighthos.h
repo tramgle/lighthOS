@@ -11,11 +11,32 @@
    available under -mno-sse/-mno-mmx/-mno-sse2. */
 #define LUA_USE_C89 1
 
-/* No dynamic loader, no /etc/lua paths, no readline. */
+/* No /etc/lua paths, no readline. */
 #undef LUA_USE_POSIX
 #undef LUA_USE_LINUX
 #undef LUA_USE_READLINE
-#undef LUA_USE_DLOPEN
+
+/* LUA_USE_DLOPEN on: loadlib.c picks up dlopen/dlsym/dlclose/dlerror
+   through <dlfcn.h> (provided by user/libc/include/dlfcn.h, wired to
+   ld-lighthos.so.1's ops table). Requires the Lua binary to be
+   dynamically linked — see Makefile's $(BUILD_USER)/lua rule. */
+#define LUA_USE_DLOPEN
+
+/* require() search paths. Stock Lua defaults to /usr/local/share/...
+   which doesn't exist on our FS. Search /lib/lua/ and the cwd. The
+   trailing "./?/init.lua" lets `require 'foo'` find `./foo/init.lua`
+   too, matching the standard lua convention. C-module loading
+   remains disabled (LUA_USE_DLOPEN not defined). */
+#define LUA_PATH_DEFAULT  "/lib/lua/?.lua;/lib/lua/?/init.lua;./?.lua;./?/init.lua"
+#define LUA_CPATH_DEFAULT "/lib/lua/?.so;/lib/?.so;./?.so"
+
+/* io.popen: libvibc provides popen()/pclose() over pipe+fork+execve
+   (user/libc/stdio.c). Override Lua's POSIX-gated l_popen so we get
+   working io.popen without also dragging in fseeko / flockfile /
+   fflush(NULL). */
+#include <stdio.h>
+#define l_popen(L, c, m)   ((void)(L), popen((c), (m)))
+#define l_pclose(L, file)  ((void)(L), pclose((file)))
 
 /* luaconf.h includes <limits.h> and <stddef.h> unconditionally — both
    provided by user/libc/include. The rest of Lua includes standard C

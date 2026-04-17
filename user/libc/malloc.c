@@ -61,8 +61,9 @@ static void freelist_remove(block_t *b) {
    region, insert it into the free list, and return it. */
 static block_t *grow_arena(uint32_t bytes) {
     uint32_t rounded = (bytes + 4095) & ~4095u;
-    void *old_brk = sys_sbrk((int32_t)rounded);
-    if (old_brk == (void *)-1) return 0;
+    long raw = sys_sbrk((long)rounded);
+    if (raw == -1) return 0;
+    void *old_brk = (void *)(uintptr_t)raw;
 
     block_t *b = (block_t *)old_brk;
     b->size = rounded;

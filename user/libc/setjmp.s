@@ -1,49 +1,37 @@
-; 32-bit setjmp/longjmp — cdecl.
-;
-; Layout of jmp_buf (uint32_t[6]): ebx, esi, edi, ebp, esp, eip
-;
-; setjmp(env):
-;   Save callee-preserved regs + caller's esp (after return addr pop)
-;   + return address. Returns 0 on direct call.
-;
-; longjmp(env, val):
-;   Restore saved regs, rewrite the return address on the new stack so
-;   we "return" to where setjmp was called from, and put val (or 1 if
-;   val == 0) into eax.
+; x86_64 setjmp / longjmp.
+; jmp_buf layout (uint64_t[8]): rbx, rbp, r12, r13, r14, r15, rsp, rip.
 
-bits 32
-
-; `:function` makes nasm tag these as STT_FUNC in the ELF symbol
-; table. Without it the defaults to NOTYPE, and ld-lighthos.so.1 skips
-; NOTYPE symbols during interposition — see lookup_in in
-; user/ldso/ld_main.c.
+bits 64
 global setjmp:function
 global longjmp:function
 
 setjmp:
-    mov eax, [esp + 4]    ; env
-    mov [eax + 0],  ebx
-    mov [eax + 4],  esi
-    mov [eax + 8],  edi
-    mov [eax + 12], ebp
-    lea ecx, [esp + 4]    ; caller's esp (above return address)
-    mov [eax + 16], ecx
-    mov ecx, [esp]        ; return address
-    mov [eax + 20], ecx
+    mov [rdi + 0],  rbx
+    mov [rdi + 8],  rbp
+    mov [rdi + 16], r12
+    mov [rdi + 24], r13
+    mov [rdi + 32], r14
+    mov [rdi + 40], r15
+    lea rcx, [rsp + 8]              ; caller's rsp (after the call pushed retaddr)
+    mov [rdi + 48], rcx
+    mov rcx, [rsp]                  ; return address
+    mov [rdi + 56], rcx
     xor eax, eax
     ret
 
 longjmp:
-    mov edx, [esp + 4]    ; env
-    mov eax, [esp + 8]    ; val
+    ; longjmp(env, val) — env in rdi, val in rsi.
+    mov eax, esi
     test eax, eax
-    jnz .have_val
+    jnz .have
     mov eax, 1
-.have_val:
-    mov ebx, [edx + 0]
-    mov esi, [edx + 4]
-    mov edi, [edx + 8]
-    mov ebp, [edx + 12]
-    mov esp, [edx + 16]
-    mov ecx, [edx + 20]
-    jmp ecx
+.have:
+    mov rbx, [rdi + 0]
+    mov rbp, [rdi + 8]
+    mov r12, [rdi + 16]
+    mov r13, [rdi + 24]
+    mov r14, [rdi + 32]
+    mov r15, [rdi + 40]
+    mov rsp, [rdi + 48]
+    mov rcx, [rdi + 56]
+    jmp rcx
