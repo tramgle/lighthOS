@@ -28,7 +28,57 @@ int atexit(void (*fn)(void)) { (void)fn; return 0; }
    in at process start. The old always-NULL stub lived here; libvibc
    picks up ulib's symbol at final-link time. */
 
-int system(const char *cmd) { (void)cmd; return -1; }
+/* Very small `system`: tokenize `cmd` on whitespace into at most
+   SYSTEM_ARGC arguments, resolve relative command names against
+   /bin/, spawn, wait. No quoting, no env, no redirection, no pipes.
+   Sufficient for Lua's `os.execute` one-liners. Returns the child's
+   exit status (0 on success). NULL cmd returns 1 to mean "a shell is
+   available" (standard C signal). */
+int system(const char *cmd) {
+    if (!cmd) return 1;
+    #define SYSTEM_ARGC 16
+    static char buf[256];
+    static char *argv[SYSTEM_ARGC + 1];
+    size_t n = 0;
+    while (cmd[n] && n < sizeof(buf) - 1) { buf[n] = cmd[n]; n++; }
+    buf[n] = 0;
+
+    int argc = 0;
+    size_t i = 0;
+    while (i < n && argc < SYSTEM_ARGC) {
+        while (i < n && (buf[i] == ' ' || buf[i] == '\t')) i++;
+        if (i >= n) break;
+        argv[argc++] = &buf[i];
+        while (i < n && buf[i] != ' ' && buf[i] != '\t') i++;
+        if (i < n) { buf[i++] = 0; }
+    }
+    argv[argc] = 0;
+    if (argc == 0) return 0;
+
+    char path[128];
+    if (argv[0][0] == '/') {
+        size_t l = 0;
+        while (argv[0][l] && l < sizeof(path) - 1) { path[l] = argv[0][l]; l++; }
+        path[l] = 0;
+    } else {
+        const char *bin = "/bin/";
+        size_t l = 0;
+        while (bin[l]) { path[l] = bin[l]; l++; }
+        size_t k = 0;
+        while (argv[0][k] && l < sizeof(path) - 1) { path[l++] = argv[0][k++]; }
+        path[l] = 0;
+    }
+
+    long pid = sys_fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        sys_execve(path, argv, 0);
+        sys_exit(127);
+    }
+    int status = 0;
+    sys_waitpid((int)pid, &status);
+    return status;
+}
 
 void __libc_assert_fail(const char *expr, const char *file, int line) {
     fprintf(stderr, "assertion failed: %s at %s:%d\n", expr, file, line);

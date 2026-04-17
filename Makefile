@@ -102,7 +102,7 @@ build/sysroot/usr/lib/libulib.a: $(BUILD_USER)/libulib/ulib.o
 LIBVIBC_SRC = user/libc/mem.c user/libc/ctype.c user/libc/errno.c \
               user/libc/locale.c user/libc/string_extra.c \
               user/libc/strtod.c user/libc/snprintf.c user/libc/malloc.c \
-              user/libc/stdio.c user/libc/misc.c
+              user/libc/stdio.c user/libc/misc.c user/libc/dlfcn.c
 LIBVIBC_OBJS = $(patsubst user/libc/%.c,build/libvibc/%.o,$(LIBVIBC_SRC)) \
                build/libvibc/setjmp.o
 
@@ -200,15 +200,15 @@ LUA_CFLAGS = $(X64_LIBC_CFLAGS) -I$(LUA_SRC_DIR) \
              -Wno-implicit-fallthrough -Wno-parentheses -Wno-empty-body \
              -Wno-maybe-uninitialized -Wno-unused-but-set-variable
 
-build/lua/%.o: $(LUA_SRC_DIR)/%.c
+build/lua/%.o: $(LUA_SRC_DIR)/%.c user/luaconf_lighthos.h
 	@mkdir -p $(dir $@)
 	$(CC) $(LUA_CFLAGS) -c $< -o $@
 
-build/lua/lua_main.o: user/lua_main.c
+build/lua/lua_main.o: user/lua_main.c user/luaconf_lighthos.h
 	@mkdir -p $(dir $@)
 	$(CC) $(LUA_CFLAGS) -c $< -o $@
 
-build/lua/linit_lighthos.o: user/linit_lighthos.c
+build/lua/linit_lighthos.o: user/linit_lighthos.c user/luaconf_lighthos.h
 	@mkdir -p $(dir $@)
 	$(CC) $(LUA_CFLAGS) -c $< -o $@
 

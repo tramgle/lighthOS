@@ -17,6 +17,14 @@
 #undef LUA_USE_READLINE
 #undef LUA_USE_DLOPEN
 
+/* io.popen: libvibc provides popen()/pclose() over pipe+fork+execve
+   (user/libc/stdio.c). Override Lua's POSIX-gated l_popen so we get
+   working io.popen without also dragging in fseeko / flockfile /
+   fflush(NULL). */
+#include <stdio.h>
+#define l_popen(L, c, m)   ((void)(L), popen((c), (m)))
+#define l_pclose(L, file)  ((void)(L), pclose((file)))
+
 /* luaconf.h includes <limits.h> and <stddef.h> unconditionally — both
    provided by user/libc/include. The rest of Lua includes standard C
    headers which we also provide. */
