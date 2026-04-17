@@ -39,11 +39,17 @@ static void vga_scroll(void) {
     vga_row = VGA_HEIGHT - 1;
 }
 
+static void vga_font_save(void);
+static void vga_font_restore(void);
+
 void vga_init(void) {
     vga_color_attr = vga_make_color(VGA_LIGHT_GREY, VGA_BLACK);
     vga_row = 0;
     vga_col = 0;
     vga_clear();
+    /* Snapshot the BIOS-loaded font so we can restore it after a
+       mode-13h session trashes plane 2. */
+    vga_font_save();
 }
 
 void vga_clear(void) {
@@ -125,6 +131,66 @@ void vga_backspace(void) {
     vga_buffer[vga_row * VGA_WIDTH + vga_col] =
         vga_entry(' ', vga_color_attr);
     vga_update_cursor();
+}
+
+/* -------- Font cache -------------------------------------------------
+ *
+ * The VGA font lives in plane 2 at phys 0xA0000 when plane 2 is
+ * selected for reads. Mode 13h's chain-4 addressing trashes plane 2
+ * (every 4th byte of a linear write lands there), so we snapshot the
+ * BIOS-loaded font once at vga_init() and restore it whenever we
+ * return to text mode. 256 chars × 32 bytes/char slot = 8 KiB. */
+
+#define VGA_FONT_BYTES 8192
+static uint8_t saved_font[VGA_FONT_BYTES];
+static int     saved_font_valid;
+
+static void vga_font_save(void) {
+    /* Put plane 2 in the 0xA0000 aperture for reads. */
+    uint8_t seq2 = 0, seq4 = 0, gc4 = 0, gc5 = 0, gc6 = 0;
+
+    outb(0x3C4, 2); seq2 = inb(0x3C5);
+    outb(0x3C4, 4); seq4 = inb(0x3C5);
+    outb(0x3CE, 4); gc4  = inb(0x3CF);
+    outb(0x3CE, 5); gc5  = inb(0x3CF);
+    outb(0x3CE, 6); gc6  = inb(0x3CF);
+
+    /* Sequencer: write-mask plane 2, disable chain-4 + odd/even. */
+    outb(0x3C4, 2); outb(0x3C5, 0x04);
+    outb(0x3C4, 4); outb(0x3C5, 0x06);
+    /* Graphics: read plane 2, read mode 0, map at 0xA0000. */
+    outb(0x3CE, 4); outb(0x3CF, 0x02);
+    outb(0x3CE, 5); outb(0x3CF, 0x00);
+    outb(0x3CE, 6); outb(0x3CF, 0x05);
+
+    uint8_t *src = (uint8_t *)(uintptr_t)(KERNEL_HHDM_BASE + 0xA0000ULL);
+    for (uint32_t i = 0; i < VGA_FONT_BYTES; i++) saved_font[i] = src[i];
+    saved_font_valid = 1;
+
+    /* Restore saved controller state. */
+    outb(0x3C4, 2); outb(0x3C5, seq2);
+    outb(0x3C4, 4); outb(0x3C5, seq4);
+    outb(0x3CE, 4); outb(0x3CF, gc4);
+    outb(0x3CE, 5); outb(0x3CF, gc5);
+    outb(0x3CE, 6); outb(0x3CF, gc6);
+}
+
+static void vga_font_restore(void) {
+    if (!saved_font_valid) return;
+    /* Sequencer: write plane 2 only, disable chain-4 + odd/even. */
+    outb(0x3C4, 2); outb(0x3C5, 0x04);
+    outb(0x3C4, 4); outb(0x3C5, 0x06);
+    /* Graphics: set/reset off, data rotate 0, write mode 0, mask FF,
+       0xA0000 mapping. */
+    outb(0x3CE, 0); outb(0x3CF, 0x00);
+    outb(0x3CE, 1); outb(0x3CF, 0x00);
+    outb(0x3CE, 3); outb(0x3CF, 0x00);
+    outb(0x3CE, 5); outb(0x3CF, 0x00);
+    outb(0x3CE, 6); outb(0x3CF, 0x05);
+    outb(0x3CE, 8); outb(0x3CF, 0xFF);
+
+    uint8_t *dst = (uint8_t *)(uintptr_t)(KERNEL_HHDM_BASE + 0xA0000ULL);
+    for (uint32_t i = 0; i < VGA_FONT_BYTES; i++) dst[i] = saved_font[i];
 }
 
 /* -------- Mode 13h (320x200x256 linear framebuffer) ----------------
@@ -293,6 +359,23 @@ void vga_text_enter(void) {
         outb(0x3C9, text_pal[i][0]);
         outb(0x3C9, text_pal[i][1]);
         outb(0x3C9, text_pal[i][2]);
+    }
+
+    /* Restore the font into plane 2 before we re-apply mode 3's
+       register set (which must be last so the sequencer ends in
+       text-mode chain-4=off state and 0xB8000 is mapped again). */
+    vga_font_restore();
+
+    /* Re-apply mode 3's sequencer / GC now that the font is back —
+       vga_font_restore left the chip in a font-access configuration. */
+    outb(0x3C4, 0); outb(0x3C5, 0x03);
+    for (int i = 0; i < 5; i++) {
+        outb(0x3C4, (uint8_t)i);
+        outb(0x3C5, mode3_seq[i]);
+    }
+    for (int i = 0; i < 9; i++) {
+        outb(0x3CE, (uint8_t)i);
+        outb(0x3CF, mode3_gc[i]);
     }
 
     /* Reset the text cursor + clear the text framebuffer. vga_buffer
