@@ -21,15 +21,36 @@ extern int vfs_write(const char *path, const void *buf, uint32_t n, uint32_t off
 
 #define BOOT_LOG_MAX 16384
 static char     boot_log_buf[BOOT_LOG_MAX];
-static uint32_t boot_log_len;
+static uint32_t boot_log_head;       /* next write slot */
+static bool     boot_log_wrapped;    /* ring has cycled at least once */
 static bool     boot_log_on;
+static volatile int boot_log_flushing;  /* re-entrance guard for panic path */
 
 void boot_log_enable(void) { boot_log_on = true; }
 
+/* Flush the boot-log ring to `path` as text. When the ring has
+ * wrapped, the write happens in two parts — [head..MAX) then
+ * [0..head) — so the file ends up in time order even for a
+ * long-lived kernel whose recent messages evicted the earliest
+ * boot chatter.
+ *
+ * Silently no-ops on re-entrance: a vfs_write that faults and
+ * panics would otherwise recurse into the flush path forever. */
 void boot_log_flush(const char *path) {
-    if (!path || boot_log_len == 0) return;
-    vfs_create(path, 1 /* VFS_FILE */);
-    vfs_write(path, boot_log_buf, boot_log_len, 0);
+    if (!path || boot_log_flushing) return;
+    boot_log_flushing = 1;
+
+    if (boot_log_wrapped) {
+        vfs_create(path, 1 /* VFS_FILE */);
+        uint32_t tail = BOOT_LOG_MAX - boot_log_head;
+        vfs_write(path, boot_log_buf + boot_log_head, tail, 0);
+        vfs_write(path, boot_log_buf, boot_log_head, tail);
+    } else if (boot_log_head > 0) {
+        vfs_create(path, 1 /* VFS_FILE */);
+        vfs_write(path, boot_log_buf, boot_log_head, 0);
+    }
+
+    boot_log_flushing = 0;
 }
 
 static void kputchar(char c, bool to_vga, bool to_serial) {
@@ -38,8 +59,12 @@ static void kputchar(char c, bool to_vga, bool to_serial) {
         if (c == '\n') serial_putchar('\r');
         serial_putchar(c);
     }
-    if (boot_log_on && boot_log_len < BOOT_LOG_MAX) {
-        boot_log_buf[boot_log_len++] = c;
+    if (boot_log_on) {
+        boot_log_buf[boot_log_head++] = c;
+        if (boot_log_head >= BOOT_LOG_MAX) {
+            boot_log_head = 0;
+            boot_log_wrapped = true;
+        }
     }
 }
 

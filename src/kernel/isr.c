@@ -1,5 +1,7 @@
 #include "kernel/isr.h"
 #include "kernel/pic.h"
+#include "kernel/debug.h"
+#include "kernel/ksyms.h"
 #include "lib/kprintf.h"
 #include "kernel/panic.h"
 
@@ -43,8 +45,12 @@ static void dump_exception(registers_t *regs) {
     }
     bool from_user = (regs->cs & 3) == 3;
 
-    kprintf("\nException: %s (#%lu) err=0x%lx rip=0x%lx\n",
-            name, regs->int_no, regs->err_code, regs->rip);
+    uint64_t rip_off = 0;
+    const char *rip_sym = ksym_lookup(regs->rip, &rip_off);
+    kprintf("\nException: %s (#%lu) err=0x%lx rip=0x%lx", name, regs->int_no,
+            regs->err_code, regs->rip);
+    if (rip_sym) kprintf("  %s+0x%lx", rip_sym, rip_off);
+    kprintf("\n");
 
     if (regs->int_no == 14) {
         uint64_t cr2;
@@ -66,6 +72,11 @@ static void dump_exception(registers_t *regs) {
     kprintf("  cs=0x%lx ss=0x%lx rflags=0x%lx  (%s)\n",
             regs->cs, regs->ss, regs->rflags,
             from_user ? "ring 3" : "ring 0");
+
+    /* Only unwind frame pointers for ring-0 exceptions. Walking a
+       user RBP chain from kernel mode risks faulting on unmapped
+       user memory, which would re-enter this path and loop. */
+    if (!from_user) debug_backtrace(regs->rbp);
 }
 
 registers_t *isr_handler(registers_t *regs) {

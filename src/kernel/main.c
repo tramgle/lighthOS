@@ -35,6 +35,8 @@
 #include "fs/ramfs.h"
 #include "fs/blkdev.h"
 #include "fs/fstab.h"
+#include "kernel/ksyms.h"
+#include "kernel/debug.h"
 
 extern char stack_top;
 
@@ -218,6 +220,20 @@ void kernel_main(uint32_t magic, multiboot_info_t *mbi) {
        both sequences silently no-op. Later, userland can hand off via
        SYS_TCSETPGRP when it spawns a foreground child. */
     process_set_foreground((uint32_t)pid);
+
+    /* Self-probe for the embedded symbol table + symbolic backtrace
+       wiring. The first line lets `make test-disk` confirm the
+       table resolves kernel_main's address back to its own name;
+       the backtrace below produces at least one "#0  rip=... name+off"
+       line so the gate also catches a dead debug_backtrace -> ksyms
+       hook-up. */
+    {
+        uint64_t off = 0;
+        const char *name = ksym_lookup((uint64_t)(uintptr_t)&kernel_main, &off);
+        serial_printf("[ksyms] ksym-self=%s+0x%lx count=%u\n",
+                      name ? name : "<null>", off, ksym_count);
+    }
+    debug_backtrace((uint64_t)(uintptr_t)__builtin_frame_address(0));
 
     /* Dump everything kprintf'd since boot to /boot.log so the user
        has a record of driver init + mounts after init takes over the

@@ -349,7 +349,28 @@ x64-userland: $(X64_USER_TARGETS) $(X64_USER_LIBC_TARGETS) \
 
 all: $(ISO)
 
-$(KERNEL_BIN): $(OBJECTS)
+# Two-stage kernel link for embedded symbol table:
+#   stage1 — link OBJECTS without ksyms_data.o so we can walk it with
+#            nm and capture every function's RIP.
+#   stage2 — regenerate ksyms_data.c from that walk, compile it, and
+#            append it to the final link. Because .text precedes
+#            .rodata in linker.ld and ksyms_data.o contributes only
+#            .rodata, all stage1 function addresses stay valid.
+KERNEL_STAGE1 = build/lighthos.stage1.bin
+
+$(KERNEL_STAGE1): $(OBJECTS)
+	@mkdir -p $(dir $@)
+	$(LD) $(LDFLAGS) -o $@ $^
+
+build/ksyms_data.c: $(KERNEL_STAGE1) tools/gen_ksyms.sh
+	@mkdir -p $(dir $@)
+	tools/gen_ksyms.sh $(KERNEL_STAGE1) > $@
+
+build/ksyms_data.o: build/ksyms_data.c
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(KERNEL_BIN): $(OBJECTS) build/ksyms_data.o
 	@mkdir -p $(dir $@)
 	$(LD) $(LDFLAGS) -o $@ $^
 
@@ -692,6 +713,22 @@ test-disk:
 	@if grep -qE 'KERNEL PANIC|Exception:' build/test-output.log; then \
 	  grep -E '^(=== |PASS |FAIL |Exception|KERNEL PANIC)' build/test-output.log; \
 	  echo "KERNEL FAULT"; exit 1; \
+	fi
+	@# Gate: the kernel symbol-table self-probe in kernel_main must
+	@# have resolved its own address back to 'kernel_main'. Any drift
+	@# between the stage1 nm walk and the stage2 link shows up here.
+	@if ! grep -q 'ksym-self=kernel_main' build/test-output.log; then \
+	  echo "FAIL: kernel symbol table self-probe"; \
+	  grep '\[ksyms\]' build/test-output.log || true; \
+	  exit 1; \
+	fi
+	@# Gate: debug_backtrace must produce a symbolic frame. Catches a
+	@# broken ksyms<->debug.c link. The "rip=0x... name+0x..." form
+	@# means a frame resolved via ksym_lookup.
+	@if ! grep -qE '^  #[0-9]+  rip=0x[0-9a-f]+  [A-Za-z_][A-Za-z0-9_]*\+0x' build/test-output.log; then \
+	  echo "FAIL: no symbolic backtrace frame found"; \
+	  grep '^  #' build/test-output.log || true; \
+	  exit 1; \
 	fi
 	@echo "--- per-script results ---"
 	@grep -E '^=== (OK|FAIL)' build/test-output.log || true
