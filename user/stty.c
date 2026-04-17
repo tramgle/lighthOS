@@ -53,8 +53,16 @@ int main(int argc, char **argv, char **envp) {
     int rc = read_reply(&rows, &cols);
     sys_tty_raw(0);
     if (rc != 0) {
-        u_puts_n("stty: no reply (terminal doesn't support CSI 6n?)\n");
-        return 1;
+        /* Terminal didn't answer. Fall back to the kernel's cached
+           winsize (24x80 default, or whatever someone set earlier). */
+        uint16_t cr = 0, cc = 0;
+        sys_tty_getsize(&cr, &cc);
+        rows = cr; cols = cc;
+    } else {
+        /* Probe succeeded — update the kernel cache so other programs
+           can read the size without re-probing (which would echo-glitch
+           again on a non-raw reader). */
+        sys_tty_setsize(rows, cols);
     }
     if (want_size) {
         u_putdec(rows); u_putc(' '); u_putdec(cols); u_putc('\n');

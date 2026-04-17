@@ -51,7 +51,8 @@ X64_USER        = hello forktest fstest \
                   mount umount chroot mmaptest env envtest \
                   sigtest alarmtest strace \
                   hexdump pagemap regions \
-                  test_pid test_fork test_fs test_stream test_pgroup test_xmm
+                  test_pid test_fork test_fs test_stream test_pgroup test_xmm \
+                  test_winsize
 # Binaries that need libvibc (stdio.h, printf, string.h) get their
 # own linker rules below — not added to X64_USER so the generic
 # pattern rule doesn't pick them up with the wrong linkage.

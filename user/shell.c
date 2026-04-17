@@ -740,6 +740,49 @@ static int expand_vars(const char *in, char *out, int cap) {
     return 0;
 }
 
+/* Probe the host terminal via CSI-6n. On success, cache the size in
+   the kernel (sys_tty_setsize) and export LINES/COLUMNS so children
+   pick them up via getenv. */
+static void probe_winsize(void) {
+    sys_tty_raw(1);
+    sys_write(1, "\033[s\033[999;999H\033[6n\033[u", 20);
+    /* Read ESC [ rows ; cols R. Bail on anything unexpected so a
+       non-VT terminal just leaves the defaults intact. */
+    char c; int rows = 0, cols = 0;
+    int saw_esc = 0;
+    for (int tries = 0; tries < 64; tries++) {
+        if (sys_read(0, &c, 1) != 1) goto bail;
+        if (c == 0x1B) { saw_esc = 1; break; }
+    }
+    if (!saw_esc) goto bail;
+    if (sys_read(0, &c, 1) != 1 || c != '[') goto bail;
+    while (sys_read(0, &c, 1) == 1 && c >= '0' && c <= '9')
+        rows = rows * 10 + (c - '0');
+    if (c != ';') goto bail;
+    while (sys_read(0, &c, 1) == 1 && c >= '0' && c <= '9')
+        cols = cols * 10 + (c - '0');
+    if (c != 'R' || rows <= 0 || cols <= 0) goto bail;
+
+    sys_tty_setsize(rows, cols);
+    extern int setenv(const char *, const char *, int);
+    char buf[8];
+    int n = 0, v = rows;
+    char tmp[8]; int tn = 0;
+    if (v == 0) tmp[tn++] = '0';
+    while (v > 0) { tmp[tn++] = '0' + (v % 10); v /= 10; }
+    while (tn > 0) buf[n++] = tmp[--tn];
+    buf[n] = 0;
+    setenv("LINES", buf, 1);
+    n = 0; v = cols; tn = 0;
+    if (v == 0) tmp[tn++] = '0';
+    while (v > 0) { tmp[tn++] = '0' + (v % 10); v /= 10; }
+    while (tn > 0) buf[n++] = tmp[--tn];
+    buf[n] = 0;
+    setenv("COLUMNS", buf, 1);
+bail:
+    sys_tty_raw(0);
+}
+
 static int run_interactive(void) {
     /* Put the shell in its own process group and claim the terminal.
        Foreground pipelines will get handed their own pgid and reclaim
@@ -749,6 +792,7 @@ static int run_interactive(void) {
     sys_setpgid(0, 0);
     sys_tcsetpgrp((int)sys_getpid());
     sys_signal(SIG_INT, SIG_IGN);
+    probe_winsize();
     char line[LINE_MAX];
     char expanded[LINE_MAX];
     for (;;) {

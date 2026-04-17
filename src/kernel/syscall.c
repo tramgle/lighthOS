@@ -522,6 +522,24 @@ mmap_done:
         break;
     }
 
+    case SYS_TTY_WINSZ: {
+        /* op=0: get — fill *a2=rows, *a3=cols (uint16_t pointers).
+           op=1: set — a2=rows, a3=cols. Default 24x80 until something
+           probes via CSI-6n and writes back. */
+        uint64_t op = a1;
+        if (op == 0) {
+            uint16_t r, c;
+            serial_get_winsize(&r, &c);
+            if (a2) *(uint16_t *)(uintptr_t)a2 = r;
+            if (a3) *(uint16_t *)(uintptr_t)a3 = c;
+            regs->rax = 0;
+        } else {
+            serial_set_winsize((uint16_t)a2, (uint16_t)a3);
+            regs->rax = 0;
+        }
+        break;
+    }
+
     case SYS_MEMINFO: {
         struct meminfo {
             uint64_t total_kb;

@@ -23,6 +23,23 @@ void serial_set_raw(int enable) {
 
 int serial_get_raw(void) { return serial_raw_mode; }
 
+/* Terminal window size cache. Userspace probes via CSI-6n and calls
+   serial_set_winsize to update. Defaults to the historical 24×80
+   minimum — programs that read this before anyone has probed get a
+   sane-but-conservative answer. */
+static uint16_t win_rows = 24;
+static uint16_t win_cols = 80;
+
+void serial_get_winsize(uint16_t *rows, uint16_t *cols) {
+    if (rows) *rows = win_rows;
+    if (cols) *cols = win_cols;
+}
+
+void serial_set_winsize(uint16_t rows, uint16_t cols) {
+    if (rows > 0) win_rows = rows;
+    if (cols > 0) win_cols = cols;
+}
+
 static int serial_is_transmit_empty(void) {
     return inb(SERIAL_COM1 + 5) & 0x20;
 }

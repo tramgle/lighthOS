@@ -211,6 +211,7 @@ static inline long sys_getpgid(int pid) {
 #define SYS_PEEK     213
 #define SYS_TTY_RAW   54
 #define SYS_TCSETPGRP 55
+#define SYS_TTY_WINSZ 56
 #define SYS_BLKDEVS  215
 #define SYS_CHDIR     12
 #define SYS_GETCWD   183
@@ -293,6 +294,17 @@ static inline long sys_tty_raw(int enable) {
    Ctrl-Z delivered by the kernel go to this group. */
 static inline long sys_tcsetpgrp(int pgid) {
     return _syscall1(SYS_TCSETPGRP, pgid);
+}
+/* Read or write the cached terminal window size. The kernel has no
+   way to probe a serial tty on its own — CSI-6n is a user-space
+   dance. Defaults to 24x80 until something (stty size, the shell
+   startup probe) writes back via sys_tty_setsize. */
+static inline long sys_tty_getsize(uint16_t *rows, uint16_t *cols) {
+    return _syscall3(SYS_TTY_WINSZ, 0,
+                     (long)(uintptr_t)rows, (long)(uintptr_t)cols);
+}
+static inline long sys_tty_setsize(int rows, int cols) {
+    return _syscall3(SYS_TTY_WINSZ, 1, rows, cols);
 }
 
 static inline size_t ustrlen(const char *s) {

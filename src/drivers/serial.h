@@ -19,4 +19,11 @@ bool serial_has_data(void);
 void serial_set_raw(int enable);
 int  serial_get_raw(void);
 
+/* Cached terminal window size. The kernel itself has no way to
+   probe a serial console (there's no SIGWINCH from QEMU's host), so
+   userspace runs the CSI-6n dance and stores the result here via
+   serial_set_winsize. Defaults to 24×80. */
+void serial_get_winsize(uint16_t *rows, uint16_t *cols);
+void serial_set_winsize(uint16_t rows, uint16_t cols);
+
 #endif
