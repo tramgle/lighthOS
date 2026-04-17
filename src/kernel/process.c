@@ -165,70 +165,69 @@ int process_resolve_path(const char *path, char *out, int cap) {
 /* The ABI requires 16-byte-aligned RSP *before* the first user
    instruction. We push argv pointers + strings + NULL envp + NULL
    auxv from the top down and land with RSP % 16 == 0. */
-static uint64_t build_user_stack(uint64_t *pml4, process_t *p,
-                                 int argc, const char **argv_src) {
-    uint64_t stack_top = USER_STACK_TOP;
-    uint64_t sp = stack_top;
+#define SPAWN_ENVP_MAX 32
 
-    /* Copy argv strings to user stack. */
-    uint64_t str_ptrs[SPAWN_ARGV_MAX];
+/* Write a single byte into the target PML4 via its HHDM-backed
+   frame. Returns 0 on missing mapping. */
+static int stack_put_byte(uint64_t *pml4, uint64_t va, uint8_t b) {
+    uint64_t page = va & ~(uint64_t)(PAGE_SIZE - 1);
+    uint64_t phys = vmm_get_physical_in(pml4, page);
+    if (!phys) return 0;
+    ((uint8_t *)phys_to_virt_low(phys))[va - page] = b;
+    return 1;
+}
+static int stack_put_u64(uint64_t *pml4, uint64_t va, uint64_t v) {
+    uint64_t page = va & ~(uint64_t)(PAGE_SIZE - 1);
+    uint64_t phys = vmm_get_physical_in(pml4, page);
+    if (!phys) return 0;
+    *(uint64_t *)((uint8_t *)phys_to_virt_low(phys) + (va - page)) = v;
+    return 1;
+}
+
+static uint64_t build_user_stack(uint64_t *pml4, process_t *p,
+                                 int argc, const char **argv_src,
+                                 int envc, const char **envp_src) {
+    (void)p;
+    uint64_t sp = USER_STACK_TOP;
+
+    /* Push strings first, top-down: envp, then argv. Record VAs. */
+    uint64_t env_ptrs[SPAWN_ENVP_MAX];
+    uint64_t arg_ptrs[SPAWN_ARGV_MAX];
+    for (int i = envc - 1; i >= 0; i--) {
+        uint64_t n = strlen(envp_src[i]) + 1;
+        sp -= n;
+        for (uint64_t o = 0; o < n; o++)
+            if (!stack_put_byte(pml4, sp + o, (uint8_t)envp_src[i][o])) return 0;
+        env_ptrs[i] = sp;
+    }
     for (int i = argc - 1; i >= 0; i--) {
         uint64_t n = strlen(argv_src[i]) + 1;
         sp -= n;
-        /* Write via identity-mapped phys of target frame. */
-        for (uint64_t off = 0; off < n; off++) {
-            uint64_t va = sp + off;
-            uint64_t page = va & ~(uint64_t)(PAGE_SIZE - 1);
-            uint64_t phys = vmm_get_physical_in(pml4, page);
-            if (!phys) return 0;
-            ((uint8_t *)phys_to_virt_low(phys))[va - page] = argv_src[i][off];
-        }
-        str_ptrs[i] = sp;
+        for (uint64_t o = 0; o < n; o++)
+            if (!stack_put_byte(pml4, sp + o, (uint8_t)argv_src[i][o])) return 0;
+        arg_ptrs[i] = sp;
     }
-    /* Align to 16 bytes. */
+
+    /* Reserve vector slots: argc, argv[0..argc], NULL, envp[0..envc], NULL,
+       auxv NULL pair. Pre-compute total and align so RSP%16==0 at entry. */
     sp &= ~(uint64_t)0xF;
-    /* Auxv terminator (2 × u64 = 0). */
-    sp -= 16;
-    /* Envp terminator. */
-    sp -= 8;
-    /* Argv: NULL + pointers (argc+1 slots), placed so that
-       (sp % 16) == 0 after the CPU does nothing (entry gets
-       argc on stack per SysV: main(argc, argv, envp)).
-       For SysV AMD64 the crt0 reads argc from [rsp], argv from
-       [rsp+8..], envp after NULL. */
-    int total_ptrs = argc + 1 /*argv NULL*/ + 1 /*envp NULL already reserved*/;
-    (void)total_ptrs;
-    sp -= 8;                            /* argv NULL */
-    for (int i = argc - 1; i >= 0; i--) {
-        sp -= 8;
-    }
-    sp -= 8;                            /* argc */
+    int total_slots = 1                 /* argc   */
+                    + (argc + 1)        /* argv + NULL */
+                    + (envc + 1)        /* envp + NULL */
+                    + 2;                /* auxv AT_NULL */
+    uint64_t need = (uint64_t)total_slots * 8;
+    uint64_t wp = sp - need;
+    wp &= ~(uint64_t)0xF;               /* entry alignment */
+    sp = wp;
 
-    /* Align to 16 now, padding upward if needed. */
-    if (sp & 0xF) sp &= ~(uint64_t)0xF;
+    if (!stack_put_u64(pml4, wp, (uint64_t)argc)) return 0; wp += 8;
+    for (int i = 0; i < argc; i++) { if (!stack_put_u64(pml4, wp, arg_ptrs[i])) return 0; wp += 8; }
+    if (!stack_put_u64(pml4, wp, 0)) return 0; wp += 8;       /* argv NULL */
+    for (int i = 0; i < envc; i++) { if (!stack_put_u64(pml4, wp, env_ptrs[i])) return 0; wp += 8; }
+    if (!stack_put_u64(pml4, wp, 0)) return 0; wp += 8;       /* envp NULL */
+    if (!stack_put_u64(pml4, wp, 0)) return 0; wp += 8;       /* auxv key  */
+    if (!stack_put_u64(pml4, wp, 0)) return 0; wp += 8;       /* auxv val  */
 
-    /* Now write the stack contents. */
-    uint64_t wp = sp;
-    /* argc */
-    uint64_t *slot;
-    #define WRITE_U64(addr, val)                                             \
-        do {                                                                  \
-            uint64_t _a = (addr);                                             \
-            uint64_t _pg = _a & ~(uint64_t)(PAGE_SIZE - 1);                   \
-            uint64_t _ph = vmm_get_physical_in(pml4, _pg);                    \
-            if (!_ph) return 0;                                               \
-            *(uint64_t *)((uint8_t *)phys_to_virt_low(_ph) + (_a - _pg)) =    \
-                (val);                                                        \
-        } while (0)
-    (void)slot;
-    WRITE_U64(wp, (uint64_t)argc); wp += 8;
-    for (int i = 0; i < argc; i++) { WRITE_U64(wp, str_ptrs[i]); wp += 8; }
-    WRITE_U64(wp, 0); wp += 8;          /* argv NULL */
-    WRITE_U64(wp, 0); wp += 8;          /* envp NULL */
-    WRITE_U64(wp, 0); wp += 8;          /* auxv AT_NULL key */
-    WRITE_U64(wp, 0); wp += 8;          /* auxv AT_NULL val */
-
-    (void)p;
     return sp;
 }
 
@@ -281,7 +280,7 @@ int process_spawn_from_memory(const char *name, const void *elf,
     }
     argv_local[argc] = 0;
 
-    uint64_t rsp = build_user_stack(pml4, p, argc, argv_local);
+    uint64_t rsp = build_user_stack(pml4, p, argc, argv_local, 0, 0);
     if (!rsp) { vmm_free_pml4(pml4); p->alive = false; return -1; }
 
     task_t *t = task_alloc(name);
@@ -438,46 +437,48 @@ int process_fork(registers_t *parent_regs) {
 
 int process_execve_from_memory(registers_t *regs, const char *name,
                                const void *elf, uint64_t size,
-                               char *const argv[]) {
+                               char *const argv[], char *const envp[]) {
     process_t *p = process_current();
     if (!p) return -1;
 
-    /* Validate the new image before destroying the old one. */
     if (elf_validate(elf, size) != 0) return -1;
 
-    /* Snapshot argv before we blow away user pages. Copy strings
-       into the process's spawn buffer. */
+    /* Snapshot argv + envp into the process's spawn buffer so the
+       pointers survive vmm_unmap_user_space. */
     const char *argv_local[SPAWN_ARGV_MAX];
-    int argc = 0;
+    const char *envp_local[SPAWN_ENVP_MAX];
+    int argc = 0, envc = 0;
     char *buf = p->spawn_argv_buf;
     uint64_t buf_used = 0;
     if (argv) {
         while (argv[argc] && argc < SPAWN_ARGV_MAX - 1) {
-            uint64_t len = 0;
-            while (argv[argc][len]) len++;
-            len++;
+            uint64_t len = 0; while (argv[argc][len]) len++; len++;
             if (buf_used + len > SPAWN_ARGV_BUF) return -1;
             memcpy(buf + buf_used, argv[argc], (uint32_t)len);
             argv_local[argc] = buf + buf_used;
-            buf_used += len;
-            argc++;
+            buf_used += len; argc++;
         }
     } else {
-        argv_local[0] = name ? name : "";
-        argc = 1;
+        argv_local[0] = name ? name : ""; argc = 1;
     }
     argv_local[argc] = 0;
+    if (envp) {
+        while (envp[envc] && envc < SPAWN_ENVP_MAX - 1) {
+            uint64_t len = 0; while (envp[envc][len]) len++; len++;
+            if (buf_used + len > SPAWN_ARGV_BUF) return -1;
+            memcpy(buf + buf_used, envp[envc], (uint32_t)len);
+            envp_local[envc] = buf + buf_used;
+            buf_used += len; envc++;
+        }
+    }
+    envp_local[envc] = 0;
 
-    /* Drop old user image in the current PML4. Kernel half (PML4
-       [256..511]) is untouched so we keep running. */
     uint64_t *pml4 = p->task->pml4;
     vmm_unmap_user_space(pml4);
 
-    /* Load new ELF into the same PML4. */
     uint64_t entry = elf_load(elf, size, pml4);
     if (!entry) return -1;
 
-    /* New user stack. */
     for (int i = 0; i < USER_STACK_PAGES; i++) {
         uint64_t va = USER_STACK_TOP - (i + 1) * PAGE_SIZE;
         uint64_t frame = pmm_alloc_frame();
@@ -486,7 +487,7 @@ int process_execve_from_memory(registers_t *regs, const char *name,
         vmm_map_in(pml4, va, frame, VMM_FLAG_WRITE | VMM_FLAG_USER);
     }
 
-    uint64_t rsp = build_user_stack(pml4, p, argc, argv_local);
+    uint64_t rsp = build_user_stack(pml4, p, argc, argv_local, envc, envp_local);
     if (!rsp) return -1;
 
     strncpy(p->name, name ? name : "exec", sizeof(p->name) - 1);

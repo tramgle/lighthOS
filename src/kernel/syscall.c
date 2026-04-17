@@ -274,8 +274,9 @@ mmap_done:
            resolve_buf is static per-call and execve's user-stack
            rebuild will issue more syscalls that stomp it. */
         char kpath[VFS_MAX_PATH];
-        for (int i = 0; path[i] && i < VFS_MAX_PATH - 1; i++) kpath[i] = path[i];
-        kpath[VFS_MAX_PATH - 1] = 0;
+        int ki = 0;
+        while (path[ki] && ki < VFS_MAX_PATH - 1) { kpath[ki] = path[ki]; ki++; }
+        kpath[ki] = 0;
         struct vfs_stat st;
         if (vfs_stat(kpath, &st) != 0 || st.size == 0) {
             regs->rax = (uint64_t)(int64_t)-1; break;
@@ -287,7 +288,8 @@ mmap_done:
             kfree_wrap(buf);
             regs->rax = (uint64_t)(int64_t)-1; break;
         }
-        int rc = process_execve_from_memory(regs, kpath, buf, st.size, argv);
+        char *const *envp = (char *const *)(uintptr_t)a3;
+        int rc = process_execve_from_memory(regs, kpath, buf, st.size, argv, envp);
         kfree_wrap(buf);
         if (rc < 0) regs->rax = (uint64_t)(int64_t)-1;
         /* Success: regs is already rewritten — when we return, the

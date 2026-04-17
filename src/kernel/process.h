@@ -91,7 +91,8 @@ int        process_resolve_path(const char *path, char *out, int cap);
    (caller keeps running in old image with errno-style return). */
 int        process_execve_from_memory(registers_t *regs, const char *name,
                                       const void *elf, uint64_t size,
-                                      char *const argv[]);
+                                      char *const argv[],
+                                      char *const envp[]);
 int        process_waitpid(uint32_t pid, int *status);
 void       process_exit(int code);
 void       process_list_all(void);

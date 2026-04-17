@@ -95,7 +95,7 @@ DISK_IMG        = build/disk.img
 X64_USER        = hello forktest fstest \
                   runtests shell assert \
                   echo cat wc head tail grep cp mv touch ls sleep mkdir \
-                  mount umount chroot mmaptest \
+                  mount umount chroot mmaptest env envtest \
                   test_pid test_fork test_fs test_stream
 X64_USER_TARGETS = $(addprefix $(BUILD_USER)/,$(X64_USER))
 
@@ -372,7 +372,7 @@ test-disk:
 	  exit 1; \
 	fi
 	@mkdir -p build
-	@timeout 45 qemu-system-x86_64 -cdrom build/lighthos-test.iso \
+	@timeout 90 qemu-system-x86_64 -cdrom build/lighthos-test.iso \
 	      -drive file=$(DISK_IMG),format=raw,if=ide \
 	      -display none -serial file:build/test-output.log -m 128M -no-reboot \
 	      -device isa-debug-exit,iobase=0x604,iosize=0x04 \

@@ -102,7 +102,7 @@ static void *multiboot_first_module(multiboot_info_t *mbi, uint64_t *size_out) {
    by phys KHEAP_PHYS, inside the 1 GiB boot-map. */
 #define KHEAP_PHYS 0x01000000ULL                        /* 16 MiB */
 #define KHEAP_VA   (0xFFFFFFFF80000000ULL + KHEAP_PHYS)
-#define KHEAP_SIZE (8 * 1024 * 1024)                    /* 8 MiB */
+#define KHEAP_SIZE (32 * 1024 * 1024)                   /* 32 MiB */
 
 void kernel_main(uint32_t magic, multiboot_info_t *mbi) {
     vga_init();
