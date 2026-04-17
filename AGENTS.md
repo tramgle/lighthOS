@@ -167,23 +167,34 @@ first-fit from `0x30000000`. dlopen interface at `0x50000000`.
 
 ## Deferred (known future work)
 
-- **Merge `x64-port` into `main`.** Not done. Next session
-  should diff the two branches and file-by-file confirm nothing
-  was lost. See "Plan for next session" below.
-- **VGA + PS/2 console**. Drivers compile and `keyboard_init()`
-  is called from `kernel_main`, but `process.c`'s `FD_CONSOLE`
-  read/write path still goes direct to `serial_getchar` /
-  `serial_putchar`. Routing it through `console_read`/`write`
-  (which mirror to both serial and VGA + parse CSI for VGA)
-  unlocks `run-vga` as an interactive path.
-- **Raw-mode serial ioctl** — would let the shell take over echo
-  and fix the history-repaint desync; also makes `stty size`'s
-  CSI-6n probe glitch-free.
-- **Unimplemented syscalls that have numbers reserved**:
-  `SYS_PEEK` (physical mem read), `SYS_PAGEMAP` (walk PT),
-  `SYS_REGIONS` (list mmap regions). Users: `hexdump`,
-  `pagemap`, `regions`, `test_badptr` — all debug tools,
-  currently unbuilt.
+- **Merge `x64-port` into `main`.** Not done. Audit in "Audit of
+  main vs x64-port" below is clean.
+- **`test_badptr` binary**. The i686 tree had a regression test that
+  handed the kernel knowingly-bad user pointers and expected `-1`.
+  Today's x86_64 syscall dispatcher does not validate user pointers
+  at all — it casts `uintptr_t` to a pointer and dereferences — so
+  the test would fault the kernel rather than assert. Fixing the
+  validation is a prerequisite. Scope: add a user-range check in
+  every `SYS_*` case that takes a user pointer.
+- **VGA as a genuinely interactive path.** FD_CONSOLE now routes
+  through `console_read`/`write` so keyboard + VGA are wired, but
+  QEMU is still launched with `-serial stdio` and no VGA-only boot
+  entry. Needs a `run-vga` grub target that drops `console=ttyS0`
+  from the kernel cmdline. Also want scrollback + attribute support
+  in `vga_putchar`.
+- **Shell + Lua REPL raw-mode takeover.** `SYS_TTY_RAW` lets user
+  code opt in, but neither the shell nor the Lua REPL actually do
+  it yet. Picking them up gets us arrow-key history without the
+  repaint desync.
+- **Lua C-module loading.** `require` works for pure-Lua modules
+  today. C modules (`require 'foo'` finding `foo.so`) need the Lua
+  binary switched from static to dynamic so ld.so runs and the
+  dlfcn trampolines (user/libc/dlfcn.c) have the ops table mapped,
+  plus `LUA_USE_DLOPEN` defined in `luaconf_lighthos.h`.
+- **Init-as-reaper loop.** `process_exit` self-reaps orphans of an
+  exiting parent; there's no long-running pid-1 reap loop. The
+  current behavior handles `bomb N`; a proper reparent-to-init
+  policy would need the init process restructured.
 - **Copy-on-write fork**. Fork copies PML4/PDPT/PD/PT eagerly;
   the 6-second test budget has headroom so it's not urgent.
 - **LD_LIBRARY_PATH / DT_RPATH**. ld.so only looks in `/lib`.
@@ -193,6 +204,12 @@ first-fit from `0x30000000`. dlopen interface at `0x50000000`.
 - **ext2 driver** (would let GRUB boot an ELF directly).
 - **uid/gid + permission model**, networking, graphical modes.
 - **Richer kernel cmdline** (single-user, log-level).
+- **Fortran front-end.** Toolchain is currently `c,c++` only; the
+  Dockerfile flip to `c,c++,fortran` is trivial but `libgfortran`
+  wants a hosted-C environment we don't provide. A minimal
+  `libgfortran_min.a` (stubs for `_gfortran_st_write`,
+  `_gfortran_stop_numeric`, etc.) would cover compute-style Fortran
+  without namelist / OPEN / derived-type I/O.
 
 ## Rescue (static) binary set
 
