@@ -53,15 +53,28 @@ static void jobs_builtin(void) {
 }
 
 static int fg_builtin(void) {
-    /* Wait on the most-recently-added live job. */
+    /* Resume the most-recently-added live job in the foreground:
+       hand it the terminal, SIGCONT the whole pgid, wait for it to
+       finish OR stop again. Ctrl-Z during fg drops us back to the
+       prompt with the job re-stopped; normal exit reaps and frees
+       the slot. */
     for (int i = MAX_JOBS - 1; i >= 0; i--) {
-        if (jobs[i].alive) {
-            int st = 0;
-            sys_waitpid(jobs[i].pid, &st);
-            jobs[i].alive = 0;
-            u_puts_n(jobs[i].cmd); u_putc('\n');
+        if (!jobs[i].alive) continue;
+        int pid = jobs[i].pid;
+        u_puts_n(jobs[i].cmd); u_putc('\n');
+        sys_tcsetpgrp(pid);                /* job's pgid leader == pid */
+        sys_kill(-pid, SIG_CONT);          /* negative pid = whole pgid */
+        int st = 0;
+        sys_waitpid(pid, &st);
+        sys_tcsetpgrp((int)sys_getpid());
+        if ((st & 0xFF) == 0x7F) {
+            /* Stopped again — keep the job entry live so another
+               fg/bg can pick it up. Print a banner like Ctrl-Z did. */
+            u_puts_n("\n[stopped] "); u_puts_n(jobs[i].cmd); u_putc('\n');
             return st;
         }
+        jobs[i].alive = 0;
+        return st;
     }
     return 0;
 }
