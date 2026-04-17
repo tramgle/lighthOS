@@ -173,8 +173,13 @@ bool serial_has_data(void) {
 }
 
 char serial_getchar(void) {
+    /* Syscall entry clears IF (via IA32_FMASK, matching the INT-gate
+       behavior of INT 0x80). Bare `hlt` with IF=0 would wait for an
+       NMI, so the UART IRQ could never wake us. `sti; hlt` is the
+       standard atomic re-enable-and-wait pair — IF flips on just
+       before the halt so any pending IRQ fires immediately. */
     while (!serial_has_data()) {
-        __asm__ volatile ("hlt");
+        __asm__ volatile ("sti; hlt; cli");
     }
     char c = serial_buffer[serial_read_idx];
     serial_read_idx = (serial_read_idx + 1) % SERIAL_BUF_SIZE;
