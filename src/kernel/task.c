@@ -7,10 +7,7 @@
 #include "lib/string.h"
 #include "lib/kprintf.h"
 
-/* Deliver signals hook — process.c defines it; weak-stub until
-   the signal layer is ported so task.c can build standalone. */
-void process_deliver_pending_signals(registers_t *regs) __attribute__((weak));
-void process_deliver_pending_signals(registers_t *regs) { (void)regs; }
+void process_deliver_pending_signals(registers_t *regs);
 
 static task_t tasks[TASK_MAX];
 static task_t *current;

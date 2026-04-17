@@ -15,17 +15,9 @@
 #include "drivers/serial.h"
 #include "lib/string.h"
 
-/* vfs_create / vfs_write are weakly referenced so the log flush
-   compiles without fs pulled in. When the fs layer is back, the
-   weak stubs get overridden at link time. */
-int vfs_create(const char *path, uint32_t type) __attribute__((weak));
-int vfs_create(const char *path, uint32_t type) { (void)path; (void)type; return -1; }
-int vfs_stat(const char *path, void *st) __attribute__((weak));
-int vfs_stat(const char *path, void *st) { (void)path; (void)st; return -1; }
-int vfs_write(const char *path, const void *buf, uint32_t n, uint32_t off) __attribute__((weak));
-int vfs_write(const char *path, const void *buf, uint32_t n, uint32_t off) {
-    (void)path; (void)buf; (void)n; (void)off; return -1;
-}
+extern int vfs_create(const char *path, uint32_t type);
+extern int vfs_stat(const char *path, void *st);
+extern int vfs_write(const char *path, const void *buf, uint32_t n, uint32_t off);
 
 #define BOOT_LOG_MAX 16384
 static char     boot_log_buf[BOOT_LOG_MAX];

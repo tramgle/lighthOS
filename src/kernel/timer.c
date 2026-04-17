@@ -11,11 +11,7 @@
 
 static volatile uint64_t tick_count = 0;
 
-/* Called from every tick; process.c provides the real hook once
-   SYS_ALARM is re-ported. Weak stub keeps the timer driver able
-   to link without process state machinery. */
-void process_tick_alarms(void) __attribute__((weak));
-void process_tick_alarms(void) { }
+extern void process_tick_alarms(void);
 
 static registers_t *timer_callback(registers_t *regs) {
     tick_count++;

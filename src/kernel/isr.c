@@ -3,8 +3,7 @@
 #include "lib/kprintf.h"
 #include "kernel/panic.h"
 
-void process_deliver_pending_signals(registers_t *regs) __attribute__((weak));
-void process_deliver_pending_signals(registers_t *regs) { (void)regs; }
+extern void process_deliver_pending_signals(registers_t *regs);
 
 static isr_handler_t handlers[256];
 
