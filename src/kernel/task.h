@@ -4,7 +4,7 @@
 #include "include/types.h"
 #include "kernel/isr.h"
 
-#define TASK_MAX        16
+#define TASK_MAX        64
 #define TASK_STACK_SIZE 16384
 
 typedef enum {
