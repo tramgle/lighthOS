@@ -126,6 +126,20 @@ static registers_t *serial_callback(registers_t *regs) {
         if (c == '\r') c = '\n';
         if (c == 0x7F) c = '\b';
         serial_enqueue(c);
+
+        /* Line-discipline-lite: echo the character back so users see
+           what they type. Printable bytes go out verbatim; Enter ends
+           the line (CR+LF); backspace rubs out the previous glyph. */
+        if (c == '\n') {
+            serial_putchar('\r');
+            serial_putchar('\n');
+        } else if (c == '\b') {
+            serial_putchar('\b');
+            serial_putchar(' ');
+            serial_putchar('\b');
+        } else if (c >= 0x20 && c < 0x7F) {
+            serial_putchar(c);
+        }
     }
     return regs;
 }
