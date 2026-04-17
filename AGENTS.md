@@ -186,11 +186,6 @@ first-fit from `0x30000000`. dlopen interface at `0x50000000`.
   code opt in, but neither the shell nor the Lua REPL actually do
   it yet. Picking them up gets us arrow-key history without the
   repaint desync.
-- **Lua C-module loading.** `require` works for pure-Lua modules
-  today. C modules (`require 'foo'` finding `foo.so`) need the Lua
-  binary switched from static to dynamic so ld.so runs and the
-  dlfcn trampolines (user/libc/dlfcn.c) have the ops table mapped,
-  plus `LUA_USE_DLOPEN` defined in `luaconf_lighthos.h`.
 - **Init-as-reaper loop.** `process_exit` self-reaps orphans of an
   exiting parent; there's no long-running pid-1 reap loop. The
   current behavior handles `bomb N`; a proper reparent-to-init
