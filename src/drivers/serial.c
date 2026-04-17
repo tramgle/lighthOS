@@ -10,18 +10,10 @@
 static char serial_buffer[SERIAL_BUF_SIZE];
 static volatile uint32_t serial_read_idx;
 static volatile uint32_t serial_write_idx;
-static uint32_t line_len;       /* chars on the current input line */
 static int serial_raw_mode;     /* 1 = caller does its own echo + line editing */
 
-void serial_set_raw(int enable) {
-    serial_raw_mode = enable ? 1 : 0;
-    /* Force line accounting back to zero on the transition. Any
-       caller flipping modes mid-input probably doesn't want the
-       kernel counter to leak across. */
-    line_len = 0;
-}
-
-int serial_get_raw(void) { return serial_raw_mode; }
+void serial_set_raw(int enable) { serial_raw_mode = enable ? 1 : 0; }
+int  serial_get_raw(void)       { return serial_raw_mode; }
 
 /* Terminal window size cache. Userspace probes via CSI-6n and calls
    serial_set_winsize to update. Defaults to the historical 24×80
@@ -155,37 +147,9 @@ static registers_t *serial_callback(registers_t *regs) {
         if (c == '\r') c = '\n';
         if (c == 0x7F) c = '\b';
 
-        /* Raw mode: user space handles echo + line editing. Pass the
-           byte through verbatim (including '\b'), no kernel mirror. */
-        if (serial_raw_mode) {
-            serial_enqueue(c);
-            continue;
-        }
-
-        /* Cooked mode: line-discipline-lite. Track how many bytes are
-           live on the current line so backspace can't chew into the
-           prompt. line_len counts chars typed since the last newline;
-           a backspace at the start is swallowed. Reset on newline. */
-        if (c == '\b') {
-            if (line_len == 0) continue;
-            line_len--;
-            serial_enqueue(c);
-            serial_putchar('\b');
-            serial_putchar(' ');
-            serial_putchar('\b');
-            continue;
-        }
-
+        /* Echo + line editing live in console_read now (so PS/2 input
+           gets the same cooking). The ISR just queues the raw byte. */
         serial_enqueue(c);
-
-        if (c == '\n') {
-            line_len = 0;
-            serial_putchar('\r');
-            serial_putchar('\n');
-        } else if (c >= 0x20 && c < 0x7F) {
-            line_len++;
-            serial_putchar(c);
-        }
     }
     return regs;
 }

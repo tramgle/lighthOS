@@ -9,22 +9,48 @@ void console_init(void) {
     /* Nothing extra — keyboard, serial, VGA already initialized */
 }
 
+/* Cooked-mode line discipline state. line_len counts visible chars
+   on the current line so BS can't chew into the prompt. Reset on \n. */
+static uint32_t line_len;
+
 ssize_t console_read(void *buf, size_t count) {
     char *cbuf = (char *)buf;
     if (count == 0) return 0;
 
-    /* Syscall entry clears IF (via IA32_FMASK). `sti; hlt; cli`
-       atomically re-enables interrupts just long enough for the
-       UART or keyboard IRQ to wake the halt. */
-    while (!keyboard_has_key() && !serial_has_data()) {
-        __asm__ volatile ("sti; hlt; cli");
+    /* Loop until we have a byte to deliver. In cooked mode we may
+       swallow a prompt-level BS and keep waiting. */
+    for (;;) {
+        /* Syscall entry clears IF (via IA32_FMASK). `sti; hlt; cli`
+           atomically re-enables interrupts just long enough for the
+           UART or keyboard IRQ to wake the halt. */
+        while (!keyboard_has_key() && !serial_has_data()) {
+            __asm__ volatile ("sti; hlt; cli");
+        }
+        char c = keyboard_has_key() ? keyboard_getchar() : serial_getchar();
+
+        /* Raw mode: pass bytes through verbatim. Shell's readline,
+           vi, and anything else driving its own cursor want this. */
+        if (serial_get_raw()) {
+            cbuf[0] = c;
+            return 1;
+        }
+
+        /* Cooked mode: echo + BS rubout + line_len guard, mirrored
+           to both serial and VGA via console_write. */
+        if (c == '\b') {
+            if (line_len == 0) continue;     /* don't eat into prompt */
+            line_len--;
+            console_write("\b \b", 3);
+        } else if (c == '\n') {
+            line_len = 0;
+            console_write("\r\n", 2);
+        } else if ((unsigned char)c >= 0x20 && (unsigned char)c < 0x7F) {
+            line_len++;
+            console_write(&c, 1);
+        }
+        cbuf[0] = c;
+        return 1;
     }
-    if (keyboard_has_key()) {
-        cbuf[0] = keyboard_getchar();
-    } else {
-        cbuf[0] = serial_getchar();
-    }
-    return 1;
 }
 
 /* ANSI escape sequence state machine */
