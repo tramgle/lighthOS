@@ -1,5 +1,7 @@
 #include "ulib_x64.h"
 
+static void u_sig_noop(int s) { (void)s; }
+
 /* Bounded fork bomb.
  *
  *   bomb N           — fork 2^N processes, all exit immediately.
@@ -59,11 +61,20 @@ int main(int argc, char **argv, char **envp) {
     if (hold_secs == 0) return 0;
 
     if (hold_secs < 0) {
-        for (;;) sys_yield();
+        /* Block until a signal (SIGINT from shell's Ctrl-C, or
+           SIGTERM/SIGKILL). The scheduler skips us entirely while
+           blocked — forever-hold costs zero CPU. */
+        for (;;) sys_pause();
     }
 
-    long start = sys_time();
-    long target = start + (long)hold_secs * 100;   /* 100 Hz */
-    while (sys_time() < target) sys_yield();
+    /* Bounded hold: sleep via alarm+pause instead of yield-spinning.
+       Install a no-op SIGALRM handler so the default terminate
+       behavior doesn't kill us. */
+    sys_signal(SIG_ALRM, u_sig_noop);
+    while (hold_secs > 0) {
+        sys_alarm(1);
+        sys_pause();
+        hold_secs--;
+    }
     return 0;
 }

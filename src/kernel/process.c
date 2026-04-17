@@ -74,6 +74,9 @@ static void signal_group(uint32_t pgid, int signo) {
             continue;
         }
         p->sig_pending |= (1u << signo);
+        /* Wake a paused task so SYS_PAUSE can return and the handler
+           runs. TASK_STOPPED stays stopped — only SIG_CONT wakes that. */
+        if (p->task && p->task->state == TASK_BLOCKED) p->task->state = TASK_READY;
     }
 }
 
@@ -868,6 +871,8 @@ int process_kill(int32_t pid, int signo) {
         return 0;
     }
     target->sig_pending |= (1u << signo);
+    if (target->task && target->task->state == TASK_BLOCKED)
+        target->task->state = TASK_READY;
     return 0;
 }
 
@@ -885,7 +890,12 @@ void process_tick_alarms(void) {
         if (!p->alive) continue;
         if (p->alarm_ticks > 0) {
             p->alarm_ticks--;
-            if (p->alarm_ticks == 0) p->sig_pending |= (1u << SIG_ALRM);
+            if (p->alarm_ticks == 0) {
+                p->sig_pending |= (1u << SIG_ALRM);
+                /* Wake a paused task so the handler can run. */
+                if (p->task && p->task->state == TASK_BLOCKED)
+                    p->task->state = TASK_READY;
+            }
         }
     }
 }

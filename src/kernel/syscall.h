@@ -52,6 +52,7 @@
 #define SYS_VGA_GFX     60   /* Enter mode 13h + map FB; return user VA. */
 #define SYS_VGA_TEXT    61   /* Back to 80x25 text mode. */
 #define SYS_TTY_LASTSRC 62   /* 0 none, 1 serial, 2 keyboard (last read). */
+#define SYS_PAUSE       64   /* Block the task until a signal arrives. */
 
 /* mmap/mprotect protection flags. PROT_EXEC is documented but not
    enforced — our paging setup has no NX bit at the i386 level. */

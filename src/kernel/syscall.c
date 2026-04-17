@@ -546,6 +546,23 @@ mmap_done:
         regs->rax = (uint64_t)console_last_input_src();
         break;
 
+    case SYS_PAUSE: {
+        /* Block the task until any signal is delivered. The scheduler
+           skips TASK_BLOCKED tasks entirely, so idle `hold` loops
+           stop burning CPU. signal_group / process_kill flip the
+           task back to TASK_READY when sig_pending is set. Return
+           value is 0 (POSIX says -1/EINTR, but we don't have errno
+           plumbing; zero is fine for our callers). */
+        process_t *p = process_current();
+        if (p && p->task) {
+            p->task->state = TASK_BLOCKED;
+            regs->rax = 0;
+            return schedule(regs);
+        }
+        regs->rax = (uint64_t)(int64_t)-1;
+        break;
+    }
+
     case SYS_VGA_GFX: {
         /* Switch to VGA mode 13h and alias the framebuffer at a
            fixed user VA chosen by the caller (a1). No-ops if called

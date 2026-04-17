@@ -202,13 +202,21 @@ registers_t *schedule(registers_t *regs) {
            CR4.OSFXSR was set in boot.s so FXSAVE/FXRSTOR are legal. */
         __asm__ volatile ("fxsave (%0)" :: "r"(current->fxstate) : "memory");
         if (current->state == TASK_RUNNING) current->state = TASK_READY;
+        task_t *prev = current;
         current = next;
         current->state = TASK_RUNNING;
         __asm__ volatile ("fxrstor (%0)" :: "r"(current->fxstate) : "memory");
         if (current->stack_base) {
             tss_set_kernel_stack(current->stack_base + TASK_STACK_SIZE);
         }
-        if (current->pml4) vmm_switch_pml4(current->pml4);
+        /* Skip the CR3 write (and its TLB flush) when the incoming
+           task shares an address space with the outgoing one. Kernel
+           tasks + threads-within-a-process hit this today; the
+           bigger win is that fork + execve intentionally give each
+           process its own PML4, so the common case is a full flush —
+           but an (admittedly minor) pgroup-wide fanout still benefits. */
+        if (current->pml4 && current->pml4 != prev->pml4)
+            vmm_switch_pml4(current->pml4);
     }
 
     registers_t *ret = (registers_t *)(uintptr_t)current->rsp;

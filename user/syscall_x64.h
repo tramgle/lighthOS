@@ -216,6 +216,7 @@ static inline long sys_getpgid(int pid) {
 #define SYS_VGA_GFX   60
 #define SYS_VGA_TEXT  61
 #define SYS_TTY_LASTSRC 62
+#define SYS_PAUSE       64
 #define SYS_BLKDEVS  215
 #define SYS_CHDIR     12
 #define SYS_GETCWD   183
@@ -329,6 +330,10 @@ static inline long sys_vga_text(void) { return _syscall0(SYS_VGA_TEXT); }
 /* Which input ring delivered the most recent console byte:
    0 = nothing read yet, 1 = serial, 2 = keyboard. */
 static inline long sys_tty_lastsrc(void) { return _syscall0(SYS_TTY_LASTSRC); }
+/* Block the task until any signal arrives. The kernel marks the
+   task TASK_BLOCKED and the scheduler skips it entirely — zero CPU
+   until a signal lands. POSIX-style equivalent of pause(). */
+static inline long sys_pause(void) { return _syscall0(SYS_PAUSE); }
 
 static inline size_t ustrlen(const char *s) {
     size_t n = 0; while (s[n]) n++; return n;
