@@ -522,6 +522,13 @@ mmap_done:
         break;
     }
 
+    case SYS_TTY_POLL:
+        /* Non-blocking "is there a byte ready on the console?" test.
+           Userspace uses this to back off probes (CSI-6n) that might
+           never get answered. */
+        regs->rax = (serial_has_data() ? 1 : 0);
+        break;
+
     case SYS_TTY_WINSZ: {
         /* op=0: get — fill *a2=rows, *a3=cols (uint16_t pointers).
            op=1: set — a2=rows, a3=cols. Default 24x80 until something

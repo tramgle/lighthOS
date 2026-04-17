@@ -212,6 +212,7 @@ static inline long sys_getpgid(int pid) {
 #define SYS_TTY_RAW   54
 #define SYS_TCSETPGRP 55
 #define SYS_TTY_WINSZ 56
+#define SYS_TTY_POLL  58
 #define SYS_BLKDEVS  215
 #define SYS_CHDIR     12
 #define SYS_GETCWD   183
@@ -305,6 +306,12 @@ static inline long sys_tty_getsize(uint16_t *rows, uint16_t *cols) {
 }
 static inline long sys_tty_setsize(int rows, int cols) {
     return _syscall3(SYS_TTY_WINSZ, 1, rows, cols);
+}
+/* Non-blocking input peek: 1 if a byte is pending on the console,
+   0 if not. Lets a caller bound the wait when they issued a probe
+   the terminal may never answer. */
+static inline long sys_tty_poll(void) {
+    return _syscall0(SYS_TTY_POLL);
 }
 
 static inline size_t ustrlen(const char *s) {

@@ -740,6 +740,16 @@ static int expand_vars(const char *in, char *out, int cap) {
     return 0;
 }
 
+/* Wait up to `yields` scheduler rounds for a byte to land on stdin,
+   then read one byte. Returns 1 on success, 0 on timeout. Keeps the
+   shell from hanging forever when the terminal doesn't answer
+   CSI-6n (dumb console, redirected stdin, etc.). */
+static int poll_read1(char *out, int yields) {
+    for (int i = 0; i < yields && !sys_tty_poll(); i++) sys_yield();
+    if (!sys_tty_poll()) return 0;
+    return sys_read(0, out, 1) == 1;
+}
+
 /* Probe the host terminal via CSI-6n. On success, cache the size in
    the kernel (sys_tty_setsize) and export LINES/COLUMNS so children
    pick them up via getenv. */
@@ -747,19 +757,20 @@ static void probe_winsize(void) {
     sys_tty_raw(1);
     sys_write(1, "\033[s\033[999;999H\033[6n\033[u", 20);
     /* Read ESC [ rows ; cols R. Bail on anything unexpected so a
-       non-VT terminal just leaves the defaults intact. */
+       non-VT terminal just leaves the defaults intact. Each byte
+       waits at most a few scheduler rounds. */
     char c; int rows = 0, cols = 0;
     int saw_esc = 0;
     for (int tries = 0; tries < 64; tries++) {
-        if (sys_read(0, &c, 1) != 1) goto bail;
+        if (!poll_read1(&c, 200)) goto bail;
         if (c == 0x1B) { saw_esc = 1; break; }
     }
     if (!saw_esc) goto bail;
-    if (sys_read(0, &c, 1) != 1 || c != '[') goto bail;
-    while (sys_read(0, &c, 1) == 1 && c >= '0' && c <= '9')
+    if (!poll_read1(&c, 100) || c != '[') goto bail;
+    while (poll_read1(&c, 100) && c >= '0' && c <= '9')
         rows = rows * 10 + (c - '0');
     if (c != ';') goto bail;
-    while (sys_read(0, &c, 1) == 1 && c >= '0' && c <= '9')
+    while (poll_read1(&c, 100) && c >= '0' && c <= '9')
         cols = cols * 10 + (c - '0');
     if (c != 'R' || rows <= 0 || cols <= 0) goto bail;
 
