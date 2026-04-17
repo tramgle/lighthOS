@@ -26,12 +26,15 @@
 #include "lib/kprintf.h"
 #include "drivers/serial.h"
 #include "fs/vfs.h"
+#include "kernel/pipe.h"
 
 #define USER_STACK_TOP 0x0000000000800000ULL
 #define USER_STACK_PAGES 4
 
 static process_t processes[PROCESS_MAX];
 static uint32_t next_pid = 1;
+
+static void fd_drop_ref(fd_entry_t *e);
 
 void process_init(void) {
     memset(processes, 0, sizeof(processes));
@@ -256,6 +259,14 @@ int process_waitpid(uint32_t pid, int *status) {
 void process_exit(int code) {
     process_t *p = process_current();
     if (p) {
+        /* Release pipe refs so EOF reaches peers promptly; file
+           fds have no ref, console stays. */
+        for (int i = 0; i < FD_MAX; i++) {
+            if (p->fds[i].type == FD_PIPE_READ ||
+                p->fds[i].type == FD_PIPE_WRITE) {
+                fd_drop_ref(&p->fds[i]);
+            }
+        }
         p->exit_code = code;
         p->alive = false;
     }
@@ -307,7 +318,16 @@ int process_fork(registers_t *parent_regs) {
     if (!child) return -1;
     child->parent_pid = parent->pid;
 
-    for (int i = 0; i < FD_MAX; i++) child->fds[i] = parent->fds[i];
+    for (int i = 0; i < FD_MAX; i++) {
+        child->fds[i] = parent->fds[i];
+        /* Each inherited pipe endpoint is a fresh reference to the
+           same kernel pipe_t — bump reader/writer refcount so ref
+           accounting reflects both parent and child fds. */
+        if (child->fds[i].type == FD_PIPE_READ)
+            pipe_add_reader((pipe_t *)child->fds[i].pipe);
+        else if (child->fds[i].type == FD_PIPE_WRITE)
+            pipe_add_writer((pipe_t *)child->fds[i].pipe);
+    }
 
     uint64_t *child_pml4 = vmm_new_pml4();
     if (!child_pml4) { child->alive = false; return -1; }
@@ -445,17 +465,67 @@ int fd_open(const char *path, uint32_t flags) {
     return -1;
 }
 
+static void fd_drop_ref(fd_entry_t *e) {
+    if (e->type == FD_PIPE_READ)  pipe_close_reader((pipe_t *)e->pipe);
+    if (e->type == FD_PIPE_WRITE) pipe_close_writer((pipe_t *)e->pipe);
+    e->type = FD_NONE;
+    e->path[0] = 0;
+    e->offset = 0;
+    e->flags  = 0;
+    e->pipe   = 0;
+}
+
 int fd_close(int fd) {
     fd_entry_t *fds = current_fds();
     if (!fds || fd < 0 || fd >= FD_MAX) return -1;
     if (fds[fd].type == FD_NONE) return -1;
-    /* Console fds 0..2 stay open across close(). Files drop to NONE. */
     if (fds[fd].type == FD_CONSOLE) return 0;
-    fds[fd].type = FD_NONE;
-    fds[fd].path[0] = 0;
-    fds[fd].offset = 0;
-    fds[fd].flags  = 0;
+    fd_drop_ref(&fds[fd]);
     return 0;
+}
+
+int fd_pipe(int fds_out[2]) {
+    fd_entry_t *fds = current_fds();
+    if (!fds) return -1;
+    int rfd = -1, wfd = -1;
+    for (int i = 3; i < FD_MAX; i++) {
+        if (fds[i].type == FD_NONE) {
+            if (rfd < 0) rfd = i;
+            else if (wfd < 0) { wfd = i; break; }
+        }
+    }
+    if (rfd < 0 || wfd < 0) return -1;
+    pipe_t *p = pipe_create();
+    if (!p) return -1;
+    pipe_add_reader(p);
+    pipe_add_writer(p);
+    fds[rfd].type = FD_PIPE_READ;  fds[rfd].pipe = p;
+    fds[wfd].type = FD_PIPE_WRITE; fds[wfd].pipe = p;
+    fds_out[0] = rfd; fds_out[1] = wfd;
+    return 0;
+}
+
+int fd_dup2(int oldfd, int newfd) {
+    fd_entry_t *fds = current_fds();
+    if (!fds) return -1;
+    if (oldfd < 0 || oldfd >= FD_MAX) return -1;
+    if (newfd < 0 || newfd >= FD_MAX) return -1;
+    if (fds[oldfd].type == FD_NONE) return -1;
+    if (oldfd == newfd) return newfd;
+    /* If newfd held a file or pipe endpoint, drop its ref first so
+       pipe refcounts stay honest. Console fds persist. */
+    if (fds[newfd].type == FD_FILE ||
+        fds[newfd].type == FD_PIPE_READ ||
+        fds[newfd].type == FD_PIPE_WRITE) {
+        fd_drop_ref(&fds[newfd]);
+    }
+    fds[newfd] = fds[oldfd];
+    /* The new fd is a fresh reference to the same underlying pipe
+       — bump the corresponding reader/writer count so the ref
+       accounting matches. */
+    if (fds[newfd].type == FD_PIPE_READ)  pipe_add_reader((pipe_t *)fds[newfd].pipe);
+    if (fds[newfd].type == FD_PIPE_WRITE) pipe_add_writer((pipe_t *)fds[newfd].pipe);
+    return newfd;
 }
 
 ssize_t fd_read(int fd, void *buf, size_t n) {
@@ -463,7 +533,6 @@ ssize_t fd_read(int fd, void *buf, size_t n) {
     if (!fds || fd < 0 || fd >= FD_MAX) return -1;
     fd_entry_t *e = &fds[fd];
     if (e->type == FD_CONSOLE) {
-        /* Blocking single-line read from the serial input ring. */
         char *out = buf;
         size_t i = 0;
         while (i < n) {
@@ -478,6 +547,8 @@ ssize_t fd_read(int fd, void *buf, size_t n) {
         if (r > 0) e->offset += (uint64_t)r;
         return r;
     }
+    if (e->type == FD_PIPE_READ)
+        return pipe_read((pipe_t *)e->pipe, buf, n);
     return -1;
 }
 
@@ -498,6 +569,8 @@ ssize_t fd_write(int fd, const void *buf, size_t n) {
         if (r > 0) e->offset += (uint64_t)r;
         return r;
     }
+    if (e->type == FD_PIPE_WRITE)
+        return pipe_write((pipe_t *)e->pipe, buf, n);
     return -1;
 }
 

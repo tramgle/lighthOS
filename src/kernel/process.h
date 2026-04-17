@@ -14,6 +14,8 @@ typedef enum {
     FD_NONE,
     FD_CONSOLE,
     FD_FILE,
+    FD_PIPE_READ,
+    FD_PIPE_WRITE,
 } fd_type_t;
 
 typedef struct {
@@ -21,6 +23,7 @@ typedef struct {
     char      path[VFS_MAX_PATH];
     uint64_t  offset;
     uint32_t  flags;
+    void     *pipe;            /* non-NULL for FD_PIPE_{READ,WRITE} */
 } fd_entry_t;
 
 #define O_RDONLY 0x00
@@ -65,6 +68,8 @@ int        process_spawn_from_path(const char *path, char *const argv[]);
 /* fd helpers — called from syscall.c. */
 int     fd_open(const char *path, uint32_t flags);
 int     fd_close(int fd);
+int     fd_dup2(int oldfd, int newfd);
+int     fd_pipe(int fds[2]);
 ssize_t fd_read(int fd, void *buf, size_t n);
 ssize_t fd_write(int fd, const void *buf, size_t n);
 off_t   fd_lseek(int fd, off_t off, int whence);

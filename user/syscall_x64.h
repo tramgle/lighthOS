@@ -30,6 +30,8 @@
 #define SYS_GETPID  20
 #define SYS_YIELD   24
 #define SYS_MKDIR   39
+#define SYS_PIPE    42
+#define SYS_DUP2    63
 #define SYS_FORK    57
 #define SYS_EXECVE  59
 #define SYS_READDIR 89
@@ -104,6 +106,12 @@ static inline long sys_time(void)                { return _syscall0(SYS_TIME); }
 static inline long sys_execve(const char *path, char *const argv[], char *const envp[]) {
     return _syscall3(SYS_EXECVE, (long)(uintptr_t)path,
                      (long)(uintptr_t)argv, (long)(uintptr_t)envp);
+}
+static inline long sys_dup2(int oldfd, int newfd) {
+    return _syscall2(SYS_DUP2, oldfd, newfd);
+}
+static inline long sys_pipe(int fds[2]) {
+    return _syscall1(SYS_PIPE, (long)(uintptr_t)fds);
 }
 
 static inline size_t ustrlen(const char *s) {

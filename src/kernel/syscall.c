@@ -32,6 +32,8 @@ static inline void  kfree_wrap(void *p)      { kfree(p); }
 #define SYS_GETPID  20
 #define SYS_YIELD   24
 #define SYS_MKDIR   39
+#define SYS_PIPE    42
+#define SYS_DUP2    63
 #define SYS_FORK    57
 #define SYS_EXECVE  59
 #define SYS_READDIR 89
@@ -125,6 +127,21 @@ static registers_t *syscall_handler(registers_t *regs) {
     case SYS_MKDIR:
         regs->rax = (uint64_t)(int64_t)vfs_mkdir((const char *)(uintptr_t)a1);
         break;
+
+    case SYS_DUP2:
+        regs->rax = (uint64_t)(int64_t)fd_dup2((int)a1, (int)a2);
+        break;
+
+    case SYS_PIPE: {
+        int pair[2];
+        int r = fd_pipe(pair);
+        if (r == 0 && a1) {
+            int *out = (int *)(uintptr_t)a1;
+            out[0] = pair[0]; out[1] = pair[1];
+        }
+        regs->rax = (uint64_t)(int64_t)r;
+        break;
+    }
 
     case SYS_FORK:
         regs->rax = (uint64_t)(int64_t)process_fork(regs);

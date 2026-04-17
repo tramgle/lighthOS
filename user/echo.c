@@ -1,15 +1,12 @@
-#include "syscall.h"
-#include "ulib.h"
+/* echo: print args separated by spaces, terminate with newline. */
+#include "ulib_x64.h"
 
-int main(int argc, char **argv) {
-    int newline = 1;
-    int first = 1;
-    if (first < argc && strcmp(argv[first], "-n") == 0) { newline = 0; first++; }
-
-    for (int i = first; i < argc; i++) {
-        if (i > first) sys_write(1, " ", 1);
-        sys_write(1, argv[i], strlen(argv[i]));
+int main(int argc, char **argv, char **envp) {
+    (void)envp;
+    for (int i = 1; i < argc; i++) {
+        if (i > 1) u_putc(' ');
+        u_puts_n(argv[i]);
     }
-    if (newline) sys_write(1, "\n", 1);
+    u_putc('\n');
     return 0;
 }

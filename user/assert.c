@@ -1,49 +1,36 @@
-/* assert <name> <expected> <file>: read file, strip trailing
-   whitespace/newlines, compare to <expected>. Print PASS/FAIL with
-   name label. Exit 0 on pass, 1 on fail. */
+/* assert <name> <expected> <file> — read file, strip trailing
+ * whitespace/newlines, compare to expected. Print PASS/FAIL.
+ * Exit 0 if PASS, 1 on FAIL. Mirrors the pre-port contract so
+ * tests/*.vsh assertions work unchanged. */
+#include "ulib_x64.h"
 
-#include "syscall.h"
-#include "ulib.h"
-
-#define ASSERT_MAX 4096
-
-int main(int argc, char **argv) {
-    if (argc != 4) {
-        puts("usage: assert <name> <expected> <file>\n");
-        return 1;
-    }
+int main(int argc, char **argv, char **envp) {
+    (void)envp;
+    if (argc < 4) { u_puts_n("assert: usage: name expected file\n"); return 2; }
     const char *name = argv[1];
     const char *expected = argv[2];
-    const char *path = argv[3];
+    const char *file = argv[3];
 
-    int fd = sys_open(path, O_RDONLY);
-    if (fd < 0) {
-        printf("FAIL %s: cannot open %s\n", name, path);
+    char buf[1024];
+    long n = u_slurp(file, buf, sizeof(buf) - 1);
+    if (n < 0) {
+        u_puts_n("FAIL "); u_puts_n(name);
+        u_puts_n(" (no file: "); u_puts_n(file); u_puts_n(")\n");
         return 1;
     }
-
-    char buf[ASSERT_MAX];
-    int len = 0;
-    int32_t n;
-    while (len < (int)sizeof buf - 1 &&
-           (n = sys_read(fd, buf + len, sizeof buf - 1 - len)) > 0) {
-        len += n;
+    buf[n] = 0;
+    while (n > 0 && (buf[n-1] == '\n' || buf[n-1] == '\r' ||
+                     buf[n-1] == ' '  || buf[n-1] == '\t')) {
+        buf[--n] = 0;
     }
-    sys_close(fd);
-    buf[len] = '\0';
 
-    /* Trim trailing whitespace/newlines. */
-    while (len > 0) {
-        char c = buf[len - 1];
-        if (c == '\n' || c == '\r' || c == ' ' || c == '\t') { len--; continue; }
-        break;
-    }
-    buf[len] = '\0';
-
-    if (strcmp(buf, expected) == 0) {
-        printf("PASS %s\n", name);
+    size_t elen = u_strlen(expected);
+    if ((size_t)n == elen && u_strncmp(buf, expected, elen) == 0) {
+        u_puts_n("PASS "); u_puts_n(name); u_putc('\n');
         return 0;
     }
-    printf("FAIL %s: expected '%s', got '%s'\n", name, expected, buf);
+    u_puts_n("FAIL "); u_puts_n(name);
+    u_puts_n(" expected='"); u_puts_n(expected);
+    u_puts_n("' got='");    u_puts_n(buf); u_puts_n("'\n");
     return 1;
 }
