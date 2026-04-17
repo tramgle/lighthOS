@@ -54,6 +54,7 @@
 #define SYS_VGA_TEXT    61   /* Back to 80x25 text mode. */
 #define SYS_TTY_LASTSRC 62   /* 0 none, 1 serial, 2 keyboard (last read). */
 #define SYS_PAUSE       64   /* Block the task until a signal arrives. */
+#define SYS_ISATTY      65   /* 1 if fd is FD_CONSOLE, 0 otherwise. */
 
 /* mmap/mprotect protection flags. PROT_EXEC is documented but not
    enforced — our paging setup has no NX bit at the i386 level. */

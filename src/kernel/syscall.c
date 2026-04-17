@@ -546,6 +546,20 @@ mmap_done:
         regs->rax = (uint64_t)console_last_input_src();
         break;
 
+    case SYS_ISATTY: {
+        /* Return 1 iff `a1` is an open fd on the console (keyboard +
+           VGA / COM1 line discipline). Used by /bin/ls to decide
+           whether to lay out in columns (tty) or one-per-line
+           (pipe / file redirect). FD_FILE, FD_PIPE_*, FD_NONE all
+           return 0. Bad fd also returns 0 — callers should treat
+           "not a tty" as the conservative default. */
+        int fd = (int)(int64_t)a1;
+        process_t *p = process_current();
+        if (!p || fd < 0 || fd >= FD_MAX) { regs->rax = 0; break; }
+        regs->rax = (p->fds[fd].type == FD_CONSOLE) ? 1 : 0;
+        break;
+    }
+
     case SYS_PAUSE: {
         /* Block the task until any signal is delivered. The scheduler
            skips TASK_BLOCKED tasks entirely, so idle `hold` loops

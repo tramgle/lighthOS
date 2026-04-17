@@ -235,6 +235,7 @@ static inline long sys_getpgid(int pid) {
 #define SYS_VGA_TEXT  61
 #define SYS_TTY_LASTSRC 62
 #define SYS_PAUSE       64
+#define SYS_ISATTY      65
 #define SYS_BLKDEVS  215
 #define SYS_CHDIR     12
 #define SYS_GETCWD   183
@@ -352,6 +353,8 @@ static inline long sys_tty_lastsrc(void) { return _syscall0(SYS_TTY_LASTSRC); }
    task TASK_BLOCKED and the scheduler skips it entirely — zero CPU
    until a signal lands. POSIX-style equivalent of pause(). */
 static inline long sys_pause(void) { return _syscall0(SYS_PAUSE); }
+/* 1 if fd is the console; 0 for pipes, files, closed fds, bad fd. */
+static inline long sys_isatty(int fd) { return _syscall1(SYS_ISATTY, fd); }
 
 static inline size_t ustrlen(const char *s) {
     size_t n = 0; while (s[n]) n++; return n;
