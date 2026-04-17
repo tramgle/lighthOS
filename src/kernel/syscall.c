@@ -20,6 +20,7 @@
 #include "drivers/serial.h"
 #include "drivers/vga.h"
 #include "drivers/keyboard.h"
+#include "drivers/console.h"
 
 /* Thin wrappers so the SYS_EXECVE case body reads cleanly even
    though heap.h's names don't have module-prefix namespacing. */
@@ -531,6 +532,18 @@ mmap_done:
            input without blocking. Checks BOTH rings — otherwise
            PS/2 keystrokes on a VGA session go invisible. */
         regs->rax = (serial_has_data() || keyboard_has_key()) ? 1 : 0;
+        break;
+
+    case SYS_VGA_TEXT:
+        /* Restore 80x25 text mode. The user-space framebuffer alias
+           that SYS_VGA_GFX set up stays mapped — harmless, the
+           process exits right after this in practice. */
+        vga_text_enter();
+        regs->rax = 0;
+        break;
+
+    case SYS_TTY_LASTSRC:
+        regs->rax = (uint64_t)console_last_input_src();
         break;
 
     case SYS_VGA_GFX: {

@@ -13,6 +13,14 @@ void console_init(void) {
    on the current line so BS can't chew into the prompt. Reset on \n. */
 static uint32_t line_len;
 
+/* Which input ring delivered the most recent byte. Userspace reads
+   this via SYS_TTY_LASTSRC to pick between "VGA-like" (keyboard) and
+   "serial-like" (UART) behavior — e.g. flappy refuses to start if
+   nobody has touched the keyboard yet, because that's almost
+   certainly a serial-only session. 0=none, 1=serial, 2=keyboard. */
+static int last_input_src;
+int console_last_input_src(void) { return last_input_src; }
+
 ssize_t console_read(void *buf, size_t count) {
     char *cbuf = (char *)buf;
     if (count == 0) return 0;
@@ -26,7 +34,14 @@ ssize_t console_read(void *buf, size_t count) {
         while (!keyboard_has_key() && !serial_has_data()) {
             __asm__ volatile ("sti; hlt; cli");
         }
-        char c = keyboard_has_key() ? keyboard_getchar() : serial_getchar();
+        char c;
+        if (keyboard_has_key()) {
+            c = keyboard_getchar();
+            last_input_src = 2;
+        } else {
+            c = serial_getchar();
+            last_input_src = 1;
+        }
 
         /* Raw mode: pass bytes through verbatim. Shell's readline,
            vi, and anything else driving its own cursor want this. */

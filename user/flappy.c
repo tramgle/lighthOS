@@ -180,13 +180,30 @@ static int poll_input(void) {
 int main(int argc, char **argv, char **envp) {
     (void)argc; (void)argv; (void)envp;
 
+    /* VGA-gate: refuse to start if there's no keyboard on the other
+       end of the console. sys_tty_lastsrc reports which ring
+       delivered the most recent byte — the shell just read "flappy"
+       from the user, so this is either 2 (PS/2 keyboard → VGA
+       session) or 1 (serial terminal → no framebuffer visible).
+       A value of 0 means nobody has typed at all, which only
+       happens on an autorun path; treat that as refusable too. */
+    long src = sys_tty_lastsrc();
+    if (src != 2) {
+        u_puts_n("flappy: needs a VGA console with PS/2 keyboard.\n"
+                 "        (the last input came from ");
+        u_puts_n(src == 1 ? "the serial line" : "nowhere");
+        u_puts_n(")\n        boot with `make run-vga` and type "
+                 "`flappy` on the VGA side.\n");
+        return 1;
+    }
+
     /* Raw mode so keystrokes come through byte-at-a-time without
        echoing onto the (now-graphical) framebuffer. */
     sys_tty_raw(1);
     rng_state = (uint32_t)sys_time() ^ 0xDEADBEEFu;
 
     long va = sys_vga_gfx(FB_VA);
-    if (va < 0) return 1;
+    if (va < 0) { sys_tty_raw(0); return 1; }
     fb = (uint8_t *)(uintptr_t)va;
 
     int score = 0;
@@ -273,6 +290,10 @@ int main(int argc, char **argv, char **envp) {
         }
     }
 
-    sys_shutdown();
+    /* Quit path: restore text mode, drop raw discipline, return to
+       the shell. The user sees the prompt reappear instead of the
+       machine shutting down. */
+    sys_vga_text();
+    sys_tty_raw(0);
     return 0;
 }

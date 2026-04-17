@@ -224,3 +224,83 @@ void vga_mode13_enter(void) {
     uint8_t *fb = (uint8_t *)(uintptr_t)(KERNEL_HHDM_BASE + 0xA0000ULL);
     for (uint32_t i = 0; i < VGA_MODE13_BYTES; i++) fb[i] = 0;
 }
+
+/* -------- Mode 3 (80x25x16 text) restore ----------------------------
+ *
+ * Register tables for the standard VGA 80x25 text mode. Font data in
+ * plane 2 is untouched by flappy (which only writes linear bytes to
+ * 0xA0000 aka plane 0 under chain-4), so QEMU's emulation keeps the
+ * character generator alive across the round-trip — no font reload
+ * needed for our use case. Restores the DAC to the 16-color EGA
+ * palette so attr bytes light up the right colors. */
+
+static const uint8_t mode3_seq[5]   = { 0x03, 0x00, 0x03, 0x00, 0x02 };
+static const uint8_t mode3_crtc[25] = {
+    0x5F, 0x4F, 0x50, 0x82, 0x55, 0x81, 0xBF, 0x1F,
+    0x00, 0x4F, 0x0D, 0x0E, 0x00, 0x00, 0x00, 0x50,
+    0x9C, 0x0E, 0x8F, 0x28, 0x1F, 0x96, 0xB9, 0xA3,
+    0xFF,
+};
+static const uint8_t mode3_gc[9]    = {
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x0E, 0x00, 0xFF,
+};
+static const uint8_t mode3_ac[21]   = {
+    0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x14, 0x07,
+    0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F,
+    0x0C, 0x00, 0x0F, 0x08, 0x00,
+};
+
+/* 16-color EGA-ish DAC palette (6-bit per channel). Indices 0..15
+   are bright where bit 3 is set. */
+static const uint8_t text_pal[16][3] = {
+    {  0,  0,  0 }, {  0,  0, 42 }, {  0, 42,  0 }, {  0, 42, 42 },
+    { 42,  0,  0 }, { 42,  0, 42 }, { 42, 21,  0 }, { 42, 42, 42 },
+    { 21, 21, 21 }, { 21, 21, 63 }, { 21, 63, 21 }, { 21, 63, 63 },
+    { 63, 21, 21 }, { 63, 21, 63 }, { 63, 63, 21 }, { 63, 63, 63 },
+};
+
+void vga_text_enter(void) {
+    outb(0x3C2, 0x67);
+
+    outb(0x3C4, 0); outb(0x3C5, 0x03);
+    for (int i = 0; i < 5; i++) {
+        outb(0x3C4, (uint8_t)i);
+        outb(0x3C5, mode3_seq[i]);
+    }
+
+    outb(0x3D4, 0x11);
+    outb(0x3D5, mode3_crtc[0x11] & 0x7F);
+    for (int i = 0; i < 25; i++) {
+        outb(0x3D4, (uint8_t)i);
+        outb(0x3D5, mode3_crtc[i]);
+    }
+
+    for (int i = 0; i < 9; i++) {
+        outb(0x3CE, (uint8_t)i);
+        outb(0x3CF, mode3_gc[i]);
+    }
+
+    (void)inb(0x3DA);
+    for (int i = 0; i < 21; i++) {
+        outb(0x3C0, (uint8_t)i);
+        outb(0x3C0, mode3_ac[i]);
+    }
+    outb(0x3C0, 0x20);
+
+    /* Restore the 16-color text palette. */
+    outb(0x3C8, 0);
+    for (int i = 0; i < 16; i++) {
+        outb(0x3C9, text_pal[i][0]);
+        outb(0x3C9, text_pal[i][1]);
+        outb(0x3C9, text_pal[i][2]);
+    }
+
+    /* Reset the text cursor + clear the text framebuffer. vga_buffer
+       points into the HHDM alias of 0xB8000, which is re-accessible
+       now that sequencer reg 4 is back to text-mode chain-4=off. */
+    vga_row = vga_col = 0;
+    vga_color_attr = vga_make_color(VGA_LIGHT_GREY, VGA_BLACK);
+    for (int i = 0; i < VGA_WIDTH * VGA_HEIGHT; i++)
+        vga_buffer[i] = vga_entry(' ', vga_color_attr);
+    vga_update_cursor();
+}
