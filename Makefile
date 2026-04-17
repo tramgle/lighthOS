@@ -46,16 +46,22 @@ DISK_IMG        = build/disk.img
 # x86_64-ported user binaries. Grows each time a user program is
 # brought back; replaces the legacy SIMPLE_USER set during the port.
 X64_USER        = hello forktest fstest \
-                  runtests shell assert \
+                  runtests shell assert bomb find \
                   echo cat wc head tail grep cp mv touch ls sleep mkdir \
                   mount umount chroot mmaptest env envtest \
                   sigtest alarmtest strace \
                   test_pid test_fork test_fs test_stream test_pgroup test_xmm
+# Binaries that need libvibc (stdio.h, printf, string.h) get their
+# own linker rules below — not added to X64_USER so the generic
+# pattern rule doesn't pick them up with the wrong linkage.
+X64_USER_LIBC   = ps lsblk free install
 # Simple single-source user targets built via the pattern rule below.
 X64_USER_TARGETS = $(addprefix $(BUILD_USER)/,$(X64_USER))
 # User targets with their own build rules (libvibc/libulib linkage):
-# lua and vi. Added to the ISO/disk staging list explicitly.
-X64_USER_EXTRA = $(BUILD_USER)/lua $(BUILD_USER)/vi
+# lua + vi + the libc-linked tools below. Added to the ISO/disk
+# staging list explicitly.
+X64_USER_LIBC_TARGETS = $(addprefix $(BUILD_USER)/,$(X64_USER_LIBC))
+X64_USER_EXTRA = $(BUILD_USER)/lua $(BUILD_USER)/vi $(X64_USER_LIBC_TARGETS)
 
 X64_USER_CFLAGS = -std=gnu99 -ffreestanding -O2 -Wall -Wextra -nostdlib \
                   -mno-red-zone -mno-sse -mno-mmx -mno-sse2 \
@@ -248,6 +254,23 @@ $(BUILD_USER)/shell: $(BUILD_USER)/crt0.o $(BUILD_USER)/shell.o \
 	    -o $@ $(BUILD_USER)/crt0.o $(BUILD_USER)/shell.o \
 	    build/sysroot/usr/lib/libulib.a
 
+# Per-binary rules for anything that #include's <stdio.h>/<string.h>
+# from libvibc. Same linkage pattern as vi.
+$(BUILD_USER)/ps.o $(BUILD_USER)/lsblk.o $(BUILD_USER)/free.o \
+$(BUILD_USER)/install.o: $(BUILD_USER)/%.o: user/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(X64_LIBC_CFLAGS) -Iuser/libc/include -c $< -o $@
+
+$(X64_USER_LIBC_TARGETS): $(BUILD_USER)/%: $(BUILD_USER)/crt0.o $(BUILD_USER)/%.o \
+                          build/sysroot/usr/lib/libvibc.a \
+                          build/sysroot/usr/lib/libulib.a
+	@mkdir -p $(dir $@)
+	x86_64-elf-ld -T user/user.ld -nostdlib -static \
+	    -o $@ $(BUILD_USER)/crt0.o $(BUILD_USER)/$*.o \
+	    build/sysroot/usr/lib/libvibc.a \
+	    build/sysroot/usr/lib/libulib.a \
+	    build/sysroot/usr/lib/libvibc.a
+
 # Dynamic user binaries: PT_INTERP=/lib/ld-lighthos.so.1 + DT_NEEDED
 # so the runtime linker resolves symbols at load time.
 $(BUILD_USER)/dynhello: $(BUILD_USER)/crt0.o user/dynhello.c \
@@ -288,7 +311,8 @@ $(BUILD_USER)/dlopentest: $(BUILD_USER)/crt0.o user/dlopentest.c \
 	      -Lbuild/sysroot/usr/lib -lulib -lgcc
 
 .PHONY: x64-userland
-x64-userland: $(X64_USER_TARGETS) $(BUILD_USER)/lua $(BUILD_USER)/vi \
+x64-userland: $(X64_USER_TARGETS) $(X64_USER_LIBC_TARGETS) \
+              $(BUILD_USER)/lua $(BUILD_USER)/vi \
               $(BUILD_USER)/dynhello $(BUILD_USER)/dyn_echo $(BUILD_USER)/dlopentest
 
 .PHONY: all clean iso run run-disk run-vga debug docker-build docker-run test docker-test iso-ready user-programs fix-perms docker-lua-compile bootdisk run-bootdisk docker-bootdisk docker-disk test-iso docker-test-iso test-disk docker-test-disk run-installed

@@ -932,3 +932,23 @@ void process_list_all(void) {
         kprintf("%u  %u  %s\n", p->pid, p->parent_pid, p->name);
     }
 }
+
+int process_info_at(uint32_t idx, struct proc_info *out) {
+    uint32_t seen = 0;
+    for (int i = 0; i < PROCESS_MAX; i++) {
+        process_t *p = &processes[i];
+        if (!p->alive) continue;
+        if (seen == idx) {
+            out->pid        = p->pid;
+            out->parent_pid = p->parent_pid;
+            out->pgid       = p->pgid;
+            out->state      = p->task ? (uint32_t)p->task->state : 4u;
+            out->alive      = p->alive ? 1u : 0u;
+            for (int k = 0; k < PROCESS_NAME_MAX; k++) out->name[k] = p->name[k];
+            for (int k = 0; k < VFS_MAX_PATH; k++)    out->root[k] = p->root[k];
+            return 0;
+        }
+        seen++;
+    }
+    return -1;
+}

@@ -14,6 +14,7 @@
 #include "fs/fstab.h"
 #include "mm/vmm.h"
 #include "mm/pmm.h"
+#include "fs/blkdev.h"
 #include "mm/heap.h"
 #include "lib/string.h"
 #include "drivers/serial.h"
@@ -407,6 +408,42 @@ mmap_done:
     case SYS_TIME:
         regs->rax = timer_get_ticks();
         break;
+
+    case SYS_PS: {
+        struct proc_info *out = (struct proc_info *)(uintptr_t)a2;
+        regs->rax = (uint64_t)(int64_t)process_info_at((uint32_t)a1, out);
+        break;
+    }
+
+    case SYS_BLKDEVS: {
+        struct blkdev_info {
+            char     name[16];
+            uint32_t total_sectors;
+            char     mount_path[32];
+            char     fs_type[16];
+            uint32_t read_only;
+        } *out = (struct blkdev_info *)(uintptr_t)a2;
+        blkdev_t *dev = blkdev_nth((int)a1);
+        if (!dev) { regs->rax = (uint64_t)(int64_t)-1; break; }
+        for (int k = 0; k < 16; k++)  out->name[k]       = dev->name[k];
+        out->total_sectors = dev->total_sectors;
+        for (int k = 0; k < 32; k++) out->mount_path[k] = dev->mount_path[k];
+        for (int k = 0; k < 16; k++) out->fs_type[k]    = dev->fs_type[k];
+        out->read_only = dev->read_only;
+        regs->rax = 0;
+        break;
+    }
+
+    case SYS_MEMINFO: {
+        struct meminfo {
+            uint64_t total_kb;
+            uint64_t free_kb;
+        } *out = (struct meminfo *)(uintptr_t)a1;
+        out->total_kb = (uint64_t)pmm_get_total_count() * 4u;   /* 4 KiB */
+        out->free_kb  = (uint64_t)pmm_get_free_count()  * 4u;
+        regs->rax = 0;
+        break;
+    }
 
     case SYS_SHUTDOWN:
         kprintf("[kernel] shutdown requested by pid %u\n",

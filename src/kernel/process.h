@@ -136,4 +136,19 @@ int        process_waitpid(uint32_t pid, int *status);
 void       process_exit(int code);
 void       process_list_all(void);
 
+/* Snapshot struct for SYS_PS. Layout is part of the user ABI. */
+struct proc_info {
+    uint32_t pid;
+    uint32_t parent_pid;
+    uint32_t pgid;
+    uint32_t state;         /* matches task_state_t: 0=READY..4=DEAD */
+    uint32_t alive;
+    char     name[PROCESS_NAME_MAX];
+    char     root[VFS_MAX_PATH];
+};
+/* Fill `out` with info about the idx'th live process (0-based over
+   the dense live set). Returns 0 on success, -1 when idx is past
+   the end. */
+int        process_info_at(uint32_t idx, struct proc_info *out);
+
 #endif

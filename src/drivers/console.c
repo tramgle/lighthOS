@@ -10,21 +10,21 @@ void console_init(void) {
 }
 
 ssize_t console_read(void *buf, size_t count) {
-    /* Non-blocking: returns 0 if no data is ready. Callers that need to
-       block must yield and retry (the syscall int-gate clears IF, so
-       halting here would deadlock — nothing could wake us). */
     char *cbuf = (char *)buf;
     if (count == 0) return 0;
 
+    /* Syscall entry clears IF (via IA32_FMASK). `sti; hlt; cli`
+       atomically re-enables interrupts just long enough for the
+       UART or keyboard IRQ to wake the halt. */
+    while (!keyboard_has_key() && !serial_has_data()) {
+        __asm__ volatile ("sti; hlt; cli");
+    }
     if (keyboard_has_key()) {
         cbuf[0] = keyboard_getchar();
-        return 1;
-    }
-    if (serial_has_data()) {
+    } else {
         cbuf[0] = serial_getchar();
-        return 1;
     }
-    return 0;
+    return 1;
 }
 
 /* ANSI escape sequence state machine */

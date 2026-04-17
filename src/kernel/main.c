@@ -28,6 +28,8 @@
 #include "kernel/timer.h"
 #include "drivers/vga.h"
 #include "drivers/serial.h"
+#include "drivers/keyboard.h"
+#include "drivers/console.h"
 #include "drivers/ata.h"
 #include "fs/vfs.h"
 #include "fs/ramfs.h"
@@ -133,6 +135,7 @@ void kernel_main(uint32_t magic, multiboot_info_t *mbi) {
     idt_init();
     timer_init(100);
     serial_init_irq();
+    keyboard_init();
     syscall_init();
 
     task_init();

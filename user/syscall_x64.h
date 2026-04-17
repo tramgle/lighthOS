@@ -204,6 +204,43 @@ static inline long sys_getpgid(int pid) {
     return _syscall1(SYS_GETPGID, pid);
 }
 
+#define SYS_PS       200
+#define SYS_MEMINFO  210
+#define SYS_BLKDEVS  215
+
+struct proc_info {
+    uint32_t pid;
+    uint32_t parent_pid;
+    uint32_t pgid;
+    uint32_t state;
+    uint32_t alive;
+    char     name[32];
+    char     root[256];
+};
+
+struct blkdev_info {
+    char     name[16];
+    uint32_t total_sectors;
+    char     mount_path[32];
+    char     fs_type[16];
+    uint32_t read_only;
+};
+
+struct meminfo {
+    uint64_t total_kb;
+    uint64_t free_kb;
+};
+
+static inline long sys_ps(uint32_t idx, struct proc_info *out) {
+    return _syscall2(SYS_PS, (long)idx, (long)(uintptr_t)out);
+}
+static inline long sys_blkdevs(uint32_t idx, struct blkdev_info *out) {
+    return _syscall2(SYS_BLKDEVS, (long)idx, (long)(uintptr_t)out);
+}
+static inline long sys_meminfo(struct meminfo *out) {
+    return _syscall1(SYS_MEMINFO, (long)(uintptr_t)out);
+}
+
 static inline size_t ustrlen(const char *s) {
     size_t n = 0; while (s[n]) n++; return n;
 }

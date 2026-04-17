@@ -1,5 +1,4 @@
-#include "syscall.h"
-#include "ulib.h"
+#include "ulib_x64.h"
 
 /* Bounded fork bomb. With argument N, each lineage forks N times before
    settling — so the final process count is 2^N. Without an argument,
@@ -14,12 +13,14 @@ static int parse_int(const char *s) {
     return v;
 }
 
-int main(int argc, char **argv) {
+int main(int argc, char **argv, char **envp) {
+    (void)envp;
     int max_gen = -1;  /* -1 = unbounded */
     if (argc > 1 && argv[1]) max_gen = parse_int(argv[1]);
 
-    int pid = sys_getpid();
-    printf("[bomb] pid=%d gen=%d\n", pid, max_gen);
+    long pid = sys_getpid();
+    u_puts_n("[bomb] pid="); u_putdec(pid);
+    u_puts_n(" gen="); u_putdec(max_gen); u_putc('\n');
 
     int gen = max_gen;
     while (gen != 0) {

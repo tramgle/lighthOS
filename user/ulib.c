@@ -91,6 +91,7 @@ static void emit_padded(const char *buf, int len, int width, int left_align, cha
     }
 }
 
+__attribute__((weak)) int printf(const char *fmt, ...);
 int printf(const char *fmt, ...) {
     va_list args;
     va_start(args, fmt);

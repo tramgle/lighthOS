@@ -370,6 +370,15 @@ int vfprintf(FILE *f, const char *fmt, va_list ap) {
     return n;
 }
 
+int printf(const char *fmt, ...) {
+    char scratch[1024];
+    va_list ap; va_start(ap, fmt);
+    int n = vsnprintf(scratch, sizeof(scratch), fmt, ap);
+    va_end(ap);
+    if (n > 0) fwrite(scratch, 1, (size_t)n, stdout);
+    return n;
+}
+
 int fprintf(FILE *f, const char *fmt, ...) {
     va_list ap; va_start(ap, fmt);
     int n = vfprintf(f, fmt, ap);
