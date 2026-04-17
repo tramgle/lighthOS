@@ -9,8 +9,7 @@
  *   - Trailing `&` backgrounds the command (pid tracked for jobs/fg).
  *   - `jobs` and `fg` builtins; `exit`, `true`, `false`.
  *
- * Deferred: input redirect (`<`), quoting escapes, real `bg`,
- * env vars, globbing.
+ * Not yet: quoting escapes (`\"`, `\\`), globbing (`*`, `?`).
  */
 
 #include "ulib_x64.h"
