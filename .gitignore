@@ -11,3 +11,4 @@ build/
 user/**/*.o
 user/**/*.pic.o
 disk.img
+AGENTS.md
