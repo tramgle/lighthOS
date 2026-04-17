@@ -286,9 +286,18 @@ static int run_script(const char *path) {
     return any_fail;
 }
 
+static int run_interactive(void) {
+    char line[LINE_MAX];
+    for (;;) {
+        u_puts_n("$ ");
+        long n = u_readline(0, line, sizeof(line));
+        if (n <= 0) return 0;          /* EOF or read error */
+        run_line(line);
+    }
+}
+
 int main(int argc, char **argv, char **envp) {
-    (void)envp;
+    (void)envp; (void)argv;
     if (argc >= 2) return run_script(argv[1]);
-    u_puts_n("shell: interactive mode not supported yet\n");
-    return 1;
+    return run_interactive();
 }

@@ -280,17 +280,26 @@ build/%.o: src/%.s
 	@mkdir -p $(dir $@)
 	$(AS) $(ASFLAGS) $< -o $@
 
-$(ISO): $(KERNEL_BIN) grub.cfg x64-userland
-	@mkdir -p build/iso/boot/grub
+$(ISO): $(KERNEL_BIN) grub.cfg x64-userland \
+        build/sysroot/usr/lib/libulib.so.1 \
+        build/sysroot/usr/lib/libvibc.so.1 \
+        build/sysroot/usr/lib/libtestdl.so.1 \
+        build/sysroot/usr/lib/ld-lighthos.so.1
+	@mkdir -p build/iso/boot/grub build/iso/boot/lib
 	cp $(KERNEL_BIN) build/iso/boot/lighthos.bin
 	cp grub.cfg build/iso/boot/grub/grub.cfg
 	@# Stage each ported user binary into the ISO so grub.cfg's
 	@# `module /boot/<name> /bin/<name>` lines can drop them into
 	@# ramfs at the declared paths.
-	@for f in $(X64_USER_TARGETS); do \
+	@for f in $(X64_USER_TARGETS) $(BUILD_USER)/dynhello \
+	          $(BUILD_USER)/dyn_echo $(BUILD_USER)/dlopentest; do \
 	    name=$$(basename $$f); \
 	    if [ -x $$f ]; then cp $$f build/iso/boot/$$name; fi; \
 	done
+	cp build/sysroot/usr/lib/libulib.so.1     build/iso/boot/lib/libulib.so.1
+	cp build/sysroot/usr/lib/libvibc.so.1     build/iso/boot/lib/libvibc.so.1
+	cp build/sysroot/usr/lib/libtestdl.so.1   build/iso/boot/lib/libtestdl.so.1
+	cp build/sysroot/usr/lib/ld-lighthos.so.1 build/iso/boot/lib/ld-lighthos.so.1
 	grub-mkrescue -o $@ build/iso 2>/dev/null
 
 # ---- Disk image with a single FAT32 partition at LBA 2048 ---------
