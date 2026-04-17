@@ -95,6 +95,7 @@ DISK_IMG        = build/disk.img
 X64_USER        = hello forktest fstest \
                   runtests shell assert \
                   echo cat wc head tail grep cp mv touch ls sleep mkdir \
+                  mount umount chroot mmaptest \
                   test_pid test_fork test_fs test_stream
 X64_USER_TARGETS = $(addprefix $(BUILD_USER)/,$(X64_USER))
 
@@ -366,8 +367,13 @@ test-disk:
 	  echo "Missing build/lighthos-test.iso — run 'make docker-test-iso' first."; \
 	  exit 1; \
 	fi
+	@if [ ! -f $(DISK_IMG) ]; then \
+	  echo "Missing $(DISK_IMG) — run 'make docker-disk' first."; \
+	  exit 1; \
+	fi
 	@mkdir -p build
 	@timeout 45 qemu-system-x86_64 -cdrom build/lighthos-test.iso \
+	      -drive file=$(DISK_IMG),format=raw,if=ide \
 	      -display none -serial file:build/test-output.log -m 128M -no-reboot \
 	      -device isa-debug-exit,iobase=0x604,iosize=0x04 \
 	      </dev/null >/dev/null 2>&1; true
@@ -396,7 +402,7 @@ test-disk:
 	@echo "All currently-achievable tests passed; scripts gated on"
 	@echo "unported kernel features are in PORT_EXPECTED_FAIL."
 
-docker-test-disk: docker-test-iso
+docker-test-disk: docker-test-iso docker-disk
 	$(MAKE) test-disk
 
 docker-run: docker-build

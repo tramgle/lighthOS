@@ -79,9 +79,85 @@ process_t *process_alloc(const char *name) {
             p->fds[0].type = FD_CONSOLE;
             p->fds[1].type = FD_CONSOLE;
             p->fds[2].type = FD_CONSOLE;
+            /* Default root = "/", cwd = "/" — inherited via fork. */
+            p->root[0] = '/'; p->root[1] = 0;
+            p->cwd[0] = '/';  p->cwd[1] = 0;
             return p;
         }
     }
+    return 0;
+}
+
+/* Canonicalize `path` against process cwd+root, writing the host-
+   absolute result to `out`. Handles "." / ".." / double-slash,
+   clamps ".." at the chroot boundary. */
+static int canon_into(const char *path, const char *cwd,
+                      char *out, int cap) {
+    char tmp[VFS_MAX_PATH];
+    int ti = 0;
+    if (path[0] == '/') {
+        tmp[ti++] = '/';
+        path++;
+    } else {
+        for (int i = 0; cwd[i] && ti < (int)sizeof(tmp) - 1; i++) tmp[ti++] = cwd[i];
+        if (ti == 0) tmp[ti++] = '/';
+        if (tmp[ti-1] != '/' && ti < (int)sizeof(tmp) - 1) tmp[ti++] = '/';
+    }
+    for (int i = 0; path[i]; i++) {
+        if (ti >= (int)sizeof(tmp) - 1) return -1;
+        tmp[ti++] = path[i];
+    }
+    tmp[ti] = 0;
+
+    /* Now canonicalize in-place into `out`. */
+    int oi = 0;
+    out[oi++] = '/';
+    int si = 0;
+    if (tmp[0] == '/') si = 1;
+    while (tmp[si]) {
+        /* collapse // */
+        if (tmp[si] == '/') { si++; continue; }
+        /* find next slash */
+        int seg = si;
+        while (tmp[si] && tmp[si] != '/') si++;
+        int seglen = si - seg;
+        if (seglen == 1 && tmp[seg] == '.') continue;
+        if (seglen == 2 && tmp[seg] == '.' && tmp[seg+1] == '.') {
+            /* walk back one segment in out (stay at root) */
+            if (oi > 1) {
+                oi--;                        /* drop trailing '/' */
+                while (oi > 1 && out[oi-1] != '/') oi--;
+            }
+            continue;
+        }
+        if (oi + seglen + 1 >= cap) return -1;
+        for (int k = 0; k < seglen; k++) out[oi++] = tmp[seg + k];
+        out[oi++] = '/';
+    }
+    /* Strip trailing slash except at root. */
+    if (oi > 1 && out[oi-1] == '/') oi--;
+    out[oi] = 0;
+    return 0;
+}
+
+int process_resolve_path(const char *path, char *out, int cap) {
+    process_t *p = process_current();
+    const char *cwd  = (p && p->cwd[0])  ? p->cwd  : "/";
+    const char *root = (p && p->root[0]) ? p->root : "/";
+    char local[VFS_MAX_PATH];
+    if (canon_into(path, cwd, local, (int)sizeof(local)) != 0) return -1;
+    /* Prepend root. Special-case root == "/" (no prefix). */
+    if (root[0] == '/' && root[1] == 0) {
+        int n = 0;
+        while (local[n] && n < cap - 1) { out[n] = local[n]; n++; }
+        out[n] = 0;
+        return 0;
+    }
+    int oi = 0;
+    for (int i = 0; root[i] && oi < cap - 1; i++) out[oi++] = root[i];
+    if (oi > 0 && out[oi-1] == '/') oi--;
+    for (int i = 0; local[i] && oi < cap - 1; i++) out[oi++] = local[i];
+    out[oi] = 0;
     return 0;
 }
 
@@ -317,6 +393,9 @@ int process_fork(registers_t *parent_regs) {
     process_t *child = process_alloc(parent->name);
     if (!child) return -1;
     child->parent_pid = parent->pid;
+    /* Inherit chroot + cwd. */
+    for (int i = 0; i < VFS_MAX_PATH; i++) child->root[i] = parent->root[i];
+    for (int i = 0; i < VFS_MAX_PATH; i++) child->cwd[i]  = parent->cwd[i];
 
     for (int i = 0; i < FD_MAX; i++) {
         child->fds[i] = parent->fds[i];

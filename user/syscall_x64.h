@@ -30,9 +30,18 @@
 #define SYS_GETPID  20
 #define SYS_YIELD   24
 #define SYS_MKDIR   39
-#define SYS_PIPE    42
-#define SYS_DUP2    63
-#define SYS_FORK    57
+#define SYS_MMAP_ANON  9
+#define SYS_MOUNT     21
+#define SYS_UMOUNT    22
+#define SYS_PIPE      42
+#define SYS_DUP2      63
+#define SYS_FORK      57
+#define SYS_CHROOT   161
+#define SYS_MPROTECT 125
+
+#define PROT_READ  0x1
+#define PROT_WRITE 0x2
+#define PROT_EXEC  0x4
 #define SYS_EXECVE  59
 #define SYS_READDIR 89
 #define SYS_SPAWN  120
@@ -112,6 +121,34 @@ static inline long sys_dup2(int oldfd, int newfd) {
 }
 static inline long sys_pipe(int fds[2]) {
     return _syscall1(SYS_PIPE, (long)(uintptr_t)fds);
+}
+static inline long sys_mmap_anon(void *addr, size_t len, long prot) {
+    return _syscall3(SYS_MMAP_ANON, (long)(uintptr_t)addr, (long)len, prot);
+}
+static inline long sys_mprotect(void *addr, size_t len, long prot) {
+    return _syscall3(SYS_MPROTECT, (long)(uintptr_t)addr, (long)len, prot);
+}
+/* sys_mount takes 4 args; use _syscall4 which passes args 1..4 in
+   RDI, RSI, RDX, R10 per the SysV-syscall convention. */
+static inline long _syscall4(long num, long a1, long a2, long a3, long a4) {
+    long ret;
+    register long r10 __asm__("r10") = a4;
+    __asm__ volatile ("int $0x80"
+                      : "=a"(ret)
+                      : "a"(num), "D"(a1), "S"(a2), "d"(a3), "r"(r10)
+                      : "memory");
+    return ret;
+}
+static inline long sys_mount(const char *src, const char *mp,
+                             const char *type, const char *flags) {
+    return _syscall4(SYS_MOUNT, (long)(uintptr_t)src, (long)(uintptr_t)mp,
+                     (long)(uintptr_t)type, (long)(uintptr_t)flags);
+}
+static inline long sys_umount(const char *mp) {
+    return _syscall1(SYS_UMOUNT, (long)(uintptr_t)mp);
+}
+static inline long sys_chroot(const char *path) {
+    return _syscall1(SYS_CHROOT, (long)(uintptr_t)path);
 }
 
 static inline size_t ustrlen(const char *s) {

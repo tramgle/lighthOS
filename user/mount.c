@@ -1,53 +1,17 @@
-/* mount [-t TYPE] [-r] SOURCE TARGET
-   mount                           (list mounted devices)
+/* mount [-t type] <source> <mountpoint> [flags] — no list mode. */
+#include "ulib_x64.h"
 
-   Thin wrapper around SYS_MOUNT. With no args, dumps the lsblk view
-   of currently mounted devices. TYPE defaults to "fat" since that's
-   what all our block devices use right now; -r requests read-only.
-   SOURCE is a blkdev name like ata0p0 (see /bin/lsblk). */
-
-#include "syscall.h"
-#include "ulib.h"
-
-static void list_mounts(void) {
-    struct blkdev_info info;
-    for (uint32_t i = 0; sys_blkdevs(i, &info) == 0; i++) {
-        if (info.mount_path[0] == '\0') continue;
-        printf("%-8s %-10s %-6s %s\n", info.name, info.mount_path,
-               info.fs_type, info.read_only ? "ro" : "rw");
-    }
-}
-
-int main(int argc, char **argv) {
-    if (argc == 1) { list_mounts(); return 0; }
-
+int main(int argc, char **argv, char **envp) {
+    (void)envp;
     const char *type = "fat";
-    const char *flags = "rw";
-    int i = 1;
-    for (; i < argc; i++) {
-        const char *a = argv[i];
-        if (a[0] != '-') break;
-        if (strcmp(a, "-t") == 0) {
-            if (++i >= argc) { puts("mount: -t needs an argument\n"); return 1; }
-            type = argv[i];
-        } else if (strcmp(a, "-r") == 0) {
-            flags = "ro";
-        } else {
-            printf("mount: unknown flag %s\n", a);
-            return 1;
-        }
+    int arg = 1;
+    if (arg + 1 < argc && u_strcmp(argv[arg], "-t") == 0) {
+        type = argv[arg + 1];
+        arg += 2;
     }
-
-    if (argc - i != 2) {
-        puts("usage: mount [-t TYPE] [-r] SOURCE TARGET\n");
-        return 1;
-    }
-    const char *source = argv[i];
-    const char *target = argv[i + 1];
-
-    if (sys_mount(source, target, type, flags) != 0) {
-        printf("mount: failed to mount %s at %s\n", source, target);
-        return 1;
-    }
-    return 0;
+    if (argc - arg < 2) { u_puts_n("mount: usage: [-t type] src mountpoint [flags]\n"); return 2; }
+    const char *src = argv[arg];
+    const char *mp  = argv[arg + 1];
+    const char *flags = (arg + 2 < argc) ? argv[arg + 2] : "rw";
+    return sys_mount(src, mp, type, flags) == 0 ? 0 : 1;
 }

@@ -45,6 +45,11 @@ typedef struct process {
     int         exit_code;
     bool        alive;
     bool        reaped;
+    /* Chroot root (host-absolute; "/" = no chroot) and cwd
+       (chroot-local, starts at "/"). process_resolve_path
+       prepends root before handing a path to the VFS. */
+    char        root[VFS_MAX_PATH];
+    char        cwd[VFS_MAX_PATH];
     /* Spawn trampoline metadata, populated by process_spawn/execve
        and consumed on first schedule. Per-process so concurrent
        spawns don't race. */
@@ -74,6 +79,10 @@ ssize_t fd_read(int fd, void *buf, size_t n);
 ssize_t fd_write(int fd, const void *buf, size_t n);
 off_t   fd_lseek(int fd, off_t off, int whence);
 int        process_fork(registers_t *parent_regs);
+
+/* Resolve `path` against the current process's cwd+chroot into
+   `out`. Returns 0 on success, -1 if the result overflows. */
+int        process_resolve_path(const char *path, char *out, int cap);
 /* Replace the current process image with `elf` of `size` bytes.
    Unmaps all user mappings in the current PML4, loads the new
    binary, builds a fresh user stack + argv, and rewrites `regs`

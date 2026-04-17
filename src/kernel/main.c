@@ -153,11 +153,20 @@ void kernel_main(uint32_t magic, multiboot_info_t *mbi) {
 
     ata_init();
     blkdev_t *ata = blkdev_get("ata0");
-    if (ata && !have_modules) {
+    if (ata) {
         uint32_t part_sects = ata->total_sectors > FAT_PARTITION_LBA
                               ? ata->total_sectors - FAT_PARTITION_LBA : 0;
         blkdev_partition(ata, FAT_PARTITION_LBA, part_sects, "ata0p0");
-        fstab_mount_defaults();
+        if (have_modules) {
+            /* ISO flow: ramfs already owns '/'. Mount the FAT
+               partition at /disk for tests that exercise mount/
+               umount round-trips. */
+            vfs_mkdir("/disk");
+            fstab_do_mount("ata0p0", "/disk", "fat", "rw");
+        } else {
+            /* Bootdisk flow: FAT is the root filesystem. */
+            fstab_mount_defaults();
+        }
     }
 
     /* Parse `autorun=<path>` from the multiboot cmdline. When set,

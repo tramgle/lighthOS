@@ -11,14 +11,29 @@
 #include "kernel/timer.h"
 #include "lib/kprintf.h"
 #include "fs/vfs.h"
+#include "fs/fstab.h"
 #include "mm/vmm.h"
+#include "mm/pmm.h"
 #include "mm/heap.h"
+#include "lib/string.h"
 #include "drivers/serial.h"
 
 /* Thin wrappers so the SYS_EXECVE case body reads cleanly even
    though heap.h's names don't have module-prefix namespacing. */
 static inline void *kmalloc_wrap(uint64_t n) { return kmalloc(n); }
 static inline void  kfree_wrap(void *p)      { kfree(p); }
+
+/* Resolve a user-supplied path through the current process's
+   cwd + chroot root. Returns NULL on overflow. The returned
+   pointer is to a static per-call buffer — caller must not hold
+   across syscall dispatches. */
+static char resolve_buf[VFS_MAX_PATH];
+static const char *resolve_path(const char *user_path) {
+    if (!user_path) return 0;
+    if (process_resolve_path(user_path, resolve_buf, sizeof(resolve_buf)) < 0)
+        return 0;
+    return resolve_buf;
+}
 
 #define SYS_EXIT     1
 #define SYS_READ     3
@@ -32,9 +47,14 @@ static inline void  kfree_wrap(void *p)      { kfree(p); }
 #define SYS_GETPID  20
 #define SYS_YIELD   24
 #define SYS_MKDIR   39
-#define SYS_PIPE    42
-#define SYS_DUP2    63
-#define SYS_FORK    57
+#define SYS_MMAP_ANON 9
+#define SYS_MOUNT    21
+#define SYS_UMOUNT   22
+#define SYS_PIPE     42
+#define SYS_DUP2     63
+#define SYS_FORK     57
+#define SYS_CHROOT  161
+#define SYS_MPROTECT 125
 #define SYS_EXECVE  59
 #define SYS_READDIR 89
 #define SYS_SPAWN  120
@@ -76,10 +96,12 @@ static registers_t *syscall_handler(registers_t *regs) {
             (const void *)(uintptr_t)a2, (size_t)a3);
         break;
 
-    case SYS_OPEN:
-        regs->rax = (uint64_t)(int64_t)fd_open(
-            (const char *)(uintptr_t)a1, (uint32_t)a2);
+    case SYS_OPEN: {
+        const char *p = resolve_path((const char *)(uintptr_t)a1);
+        regs->rax = p ? (uint64_t)(int64_t)fd_open(p, (uint32_t)a2)
+                      : (uint64_t)(int64_t)-1;
         break;
+    }
 
     case SYS_CLOSE:
         regs->rax = (uint64_t)(int64_t)fd_close((int)a1);
@@ -93,13 +115,18 @@ static registers_t *syscall_handler(registers_t *regs) {
         break;
     }
 
-    case SYS_UNLINK:
-        regs->rax = (uint64_t)(int64_t)vfs_unlink((const char *)(uintptr_t)a1);
+    case SYS_UNLINK: {
+        const char *p = resolve_path((const char *)(uintptr_t)a1);
+        regs->rax = p ? (uint64_t)(int64_t)vfs_unlink(p)
+                      : (uint64_t)(int64_t)-1;
         break;
+    }
 
     case SYS_STAT: {
+        const char *p = resolve_path((const char *)(uintptr_t)a1);
+        if (!p) { regs->rax = (uint64_t)(int64_t)-1; break; }
         struct vfs_stat kst;
-        int r = vfs_stat((const char *)(uintptr_t)a1, &kst);
+        int r = vfs_stat(p, &kst);
         if (r == 0 && a2) {
             struct user_vfs_stat *u = (struct user_vfs_stat *)(uintptr_t)a2;
             u->inode = kst.inode;
@@ -124,13 +151,102 @@ static registers_t *syscall_handler(registers_t *regs) {
         regs->rax = 0;
         break;
 
-    case SYS_MKDIR:
-        regs->rax = (uint64_t)(int64_t)vfs_mkdir((const char *)(uintptr_t)a1);
+    case SYS_MKDIR: {
+        const char *p = resolve_path((const char *)(uintptr_t)a1);
+        regs->rax = p ? (uint64_t)(int64_t)vfs_mkdir(p)
+                      : (uint64_t)(int64_t)-1;
         break;
+    }
 
     case SYS_DUP2:
         regs->rax = (uint64_t)(int64_t)fd_dup2((int)a1, (int)a2);
         break;
+
+    case SYS_MMAP_ANON: {
+        /* mmap_anon(addr, len, prot) — allocate len-bytes rounded
+           to PAGE_SIZE, map at addr with USER|flags. Returns addr
+           on success, -1 on overlap or OOM. */
+        uint64_t addr = a1 & ~(uint64_t)(PAGE_SIZE - 1);
+        uint64_t len  = (a2 + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+        uint64_t prot = a3;
+        if (len == 0 || addr == 0) { regs->rax = (uint64_t)(int64_t)-1; break; }
+        uint64_t *pml4 = task_current_pml4();
+        if (!pml4) { regs->rax = (uint64_t)(int64_t)-1; break; }
+        /* reject overlap with any existing user mapping */
+        for (uint64_t va = addr; va < addr + len; va += PAGE_SIZE) {
+            if (vmm_get_physical_in(pml4, va)) {
+                regs->rax = (uint64_t)(int64_t)-1; goto mmap_done;
+            }
+        }
+        uint64_t flags = VMM_FLAG_USER;
+        if (prot & 0x2) flags |= VMM_FLAG_WRITE;
+        for (uint64_t va = addr; va < addr + len; va += PAGE_SIZE) {
+            uint64_t frame = pmm_alloc_frame();
+            if (!frame) { regs->rax = (uint64_t)(int64_t)-1; goto mmap_done; }
+            memset(phys_to_virt_low(frame), 0, PAGE_SIZE);
+            vmm_map_in(pml4, va, frame, flags);
+        }
+        regs->rax = addr;
+mmap_done:
+        break;
+    }
+
+    case SYS_MPROTECT: {
+        uint64_t addr = a1 & ~(uint64_t)(PAGE_SIZE - 1);
+        uint64_t len  = (a2 + PAGE_SIZE - 1) & ~(uint64_t)(PAGE_SIZE - 1);
+        uint64_t prot = a3;
+        uint64_t *pml4 = task_current_pml4();
+        if (!pml4) { regs->rax = (uint64_t)(int64_t)-1; break; }
+        uint64_t flags = VMM_FLAG_USER;
+        if (prot & 0x2) flags |= VMM_FLAG_WRITE;
+        int rc = 0;
+        for (uint64_t va = addr; va < addr + len; va += PAGE_SIZE) {
+            if (vmm_set_flags_in(pml4, va, flags) < 0) { rc = -1; break; }
+        }
+        regs->rax = (uint64_t)(int64_t)rc;
+        break;
+    }
+
+    case SYS_MOUNT: {
+        /* rdi=src, rsi=mountpoint, rdx=type, r10=flags */
+        uint64_t a4 = regs->r10;
+        const char *src   = (const char *)(uintptr_t)a1;
+        const char *mp    = (const char *)(uintptr_t)a2;
+        const char *type  = (const char *)(uintptr_t)a3;
+        const char *flags = a4 ? (const char *)(uintptr_t)a4 : "rw";
+        regs->rax = (uint64_t)(int64_t)fstab_do_mount(src, mp, type, flags);
+        break;
+    }
+
+    case SYS_UMOUNT:
+        regs->rax = (uint64_t)(int64_t)vfs_umount((const char *)(uintptr_t)a1);
+        if (regs->rax == 0) {
+            /* clear mount_path on the backing blkdev so lsblk shows
+               detached state. best-effort — the blkdev lookup is
+               by-mount-path which we don't store in vfs_mount, so
+               skip the back-clear for now. */
+        }
+        break;
+
+    case SYS_CHROOT: {
+        process_t *p = process_current();
+        if (!p) { regs->rax = (uint64_t)(int64_t)-1; break; }
+        const char *target = resolve_path((const char *)(uintptr_t)a1);
+        if (!target) { regs->rax = (uint64_t)(int64_t)-1; break; }
+        struct vfs_stat st;
+        if (vfs_stat(target, &st) != 0 || st.type != VFS_DIR) {
+            regs->rax = (uint64_t)(int64_t)-1; break;
+        }
+        int n = 0;
+        while (target[n] && n < VFS_MAX_PATH - 1) {
+            p->root[n] = target[n]; n++;
+        }
+        while (n > 1 && p->root[n-1] == '/') n--;
+        p->root[n] = 0;
+        p->cwd[0] = '/'; p->cwd[1] = 0;
+        regs->rax = 0;
+        break;
+    }
 
     case SYS_PIPE: {
         int pair[2];
@@ -150,20 +266,28 @@ static registers_t *syscall_handler(registers_t *regs) {
     case SYS_EXECVE: {
         /* (path, argv, envp). Reads the ELF via vfs, unmaps the
            caller's user image, loads the new one, rewrites regs. */
-        const char *path = (const char *)(uintptr_t)a1;
+        const char *upath = (const char *)(uintptr_t)a1;
         char *const *argv = (char *const *)(uintptr_t)a2;
+        const char *path = resolve_path(upath);
+        if (!path) { regs->rax = (uint64_t)(int64_t)-1; break; }
+        /* Copy the resolved path into a stable kernel buffer — the
+           resolve_buf is static per-call and execve's user-stack
+           rebuild will issue more syscalls that stomp it. */
+        char kpath[VFS_MAX_PATH];
+        for (int i = 0; path[i] && i < VFS_MAX_PATH - 1; i++) kpath[i] = path[i];
+        kpath[VFS_MAX_PATH - 1] = 0;
         struct vfs_stat st;
-        if (vfs_stat(path, &st) != 0 || st.size == 0) {
+        if (vfs_stat(kpath, &st) != 0 || st.size == 0) {
             regs->rax = (uint64_t)(int64_t)-1; break;
         }
         void *buf = kmalloc_wrap(st.size);
         if (!buf) { regs->rax = (uint64_t)(int64_t)-1; break; }
-        ssize_t r = vfs_read(path, buf, st.size, 0);
+        ssize_t r = vfs_read(kpath, buf, st.size, 0);
         if (r != (ssize_t)st.size) {
             kfree_wrap(buf);
             regs->rax = (uint64_t)(int64_t)-1; break;
         }
-        int rc = process_execve_from_memory(regs, path, buf, st.size, argv);
+        int rc = process_execve_from_memory(regs, kpath, buf, st.size, argv);
         kfree_wrap(buf);
         if (rc < 0) regs->rax = (uint64_t)(int64_t)-1;
         /* Success: regs is already rewritten — when we return, the
@@ -173,10 +297,11 @@ static registers_t *syscall_handler(registers_t *regs) {
     }
 
     case SYS_READDIR: {
+        const char *p = resolve_path((const char *)(uintptr_t)a1);
+        if (!p) { regs->rax = (uint64_t)(int64_t)-1; break; }
         char name[VFS_MAX_NAME];
         uint32_t type = 0;
-        int r = vfs_readdir((const char *)(uintptr_t)a1,
-                            (uint32_t)a2, name, &type);
+        int r = vfs_readdir(p, (uint32_t)a2, name, &type);
         if (r == 0 && a3) {
             /* User passes {char name[VFS_MAX_NAME]; uint32_t type;} */
             char *out = (char *)(uintptr_t)a3;
