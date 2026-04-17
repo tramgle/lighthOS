@@ -312,18 +312,30 @@ $(ISO): $(KERNEL_BIN) grub.cfg x64-userland \
 DISK_SIZE_MB    = 64
 DISK_FAT_OFFSET = 2048
 
-$(DISK_IMG): x64-userland
+$(DISK_IMG): x64-userland \
+             build/sysroot/usr/lib/libulib.so.1 \
+             build/sysroot/usr/lib/libvibc.so.1 \
+             build/sysroot/usr/lib/libtestdl.so.1 \
+             build/sysroot/usr/lib/ld-lighthos.so.1
 	@mkdir -p $(dir $@)
 	@echo "Creating $(DISK_SIZE_MB) MB disk with FAT32 at LBA $(DISK_FAT_OFFSET)"
 	dd if=/dev/zero of=$@ bs=1M count=$(DISK_SIZE_MB) 2>/dev/null
 	mkfs.fat -F 32 -n LIGHTHOS --offset=$(DISK_FAT_OFFSET) $@ >/dev/null 2>&1
 	mmd -i $@@@$$(($(DISK_FAT_OFFSET)*512)) ::BIN 2>/dev/null || true
-	@for f in $(X64_USER_TARGETS); do \
+	mmd -i $@@@$$(($(DISK_FAT_OFFSET)*512)) ::LIB 2>/dev/null || true
+	@for f in $(X64_USER_TARGETS) $(X64_USER_EXTRA) $(BUILD_USER)/dynhello \
+	          $(BUILD_USER)/dyn_echo $(BUILD_USER)/dlopentest; do \
 	    name=$$(basename $$f); \
 	    mcopy -i $@@@$$(($(DISK_FAT_OFFSET)*512)) -D o $$f ::BIN/$$name; \
 	done
-	@# Copy init: pick hello as default so bootdisk boots the smoke test.
-	mcopy -i $@@@$$(($(DISK_FAT_OFFSET)*512)) -D o $(BUILD_USER)/hello ::BIN/init
+	@# Copy init: shell takes over as init on the bootdisk path, matching
+	@# the grub-ISO layout. /BIN/init is how process.c's autorun fallback
+	@# finds it; /BIN/shell is there so runtime lookups still resolve.
+	mcopy -i $@@@$$(($(DISK_FAT_OFFSET)*512)) -D o $(BUILD_USER)/shell ::BIN/init
+	mcopy -i $@@@$$(($(DISK_FAT_OFFSET)*512)) -D o build/sysroot/usr/lib/ld-lighthos.so.1 ::LIB/ld-lighthos.so.1
+	mcopy -i $@@@$$(($(DISK_FAT_OFFSET)*512)) -D o build/sysroot/usr/lib/libulib.so.1     ::LIB/libulib.so.1
+	mcopy -i $@@@$$(($(DISK_FAT_OFFSET)*512)) -D o build/sysroot/usr/lib/libvibc.so.1     ::LIB/libvibc.so.1
+	mcopy -i $@@@$$(($(DISK_FAT_OFFSET)*512)) -D o build/sysroot/usr/lib/libtestdl.so.1   ::LIB/libtestdl.so.1
 	@echo "$@ ready ($(DISK_SIZE_MB) MB, FAT32)"
 
 # Back-compat alias so `make disk.img` and `make docker-disk` still work.
