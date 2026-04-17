@@ -345,7 +345,10 @@ sighandler_t signal(int signo, sighandler_t handler) {
 long sys_sbrk(long delta) {
     static uint8_t *heap_cur = 0;
     static uint8_t *heap_end = 0;
-    static uint64_t arena_next = 0x50000000ULL;
+    /* Start above ld.so's fixed regions: ld.so itself at 0x40000000,
+       DL iface at 0x50000000. Dynamic binaries (Lua) would otherwise
+       collide on first grow. */
+    static uint64_t arena_next = 0x60000000ULL;
     const long CHUNK = 0x10000;                /* 64 KiB */
 
     if (!heap_cur) {

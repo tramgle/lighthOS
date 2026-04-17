@@ -16,3 +16,11 @@ assert lua.require.loaded 1 /scratch/req_ok
 lua -e "print(package.path)" > /scratch/ppath
 grep "/lib/lua" /scratch/ppath | wc -l > /scratch/ppath_ok
 assert lua.package.path 1 /scratch/ppath_ok
+
+# C-module require: load /lib/luamod.so (built from user/libluamod).
+# Its luaopen_luamod returns a table with answer() -> 42. This is the
+# dlopen-via-ld.so + dlsym roundtrip that motivated making the Lua
+# binary dynamic.
+lua -e "local m = require('luamod'); print(m.answer())" > /scratch/creq
+grep 42 /scratch/creq | wc -l > /scratch/creq_ok
+assert lua.require.cmodule 1 /scratch/creq_ok

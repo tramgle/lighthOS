@@ -129,6 +129,20 @@ build/sysroot/usr/lib/libtestdl.so.1: user/libtestdl/libtestdl.c
 	      -mno-red-zone -fno-stack-protector \
 	      -o $@ build/libvibc/libtestdl.o -lgcc
 
+# luamod.so — a Lua C module. Exports luaopen_luamod; its other
+# symbol references (lua_pushinteger, luaL_newlib) are resolved at
+# dlopen-time against the main /bin/lua binary, which is built with
+# --export-dynamic so its Lua core symbols are visible.
+build/sysroot/usr/lib/luamod.so: user/libluamod/libluamod.c
+	@mkdir -p $(dir $@)
+	$(CC) $(X64_LIBC_CFLAGS) -I$(LUA_SRC_DIR) -fPIC -fvisibility=default \
+	      -c $< -o build/libvibc/libluamod.o
+	$(CC) -nostdlib -ffreestanding \
+	      -Wl,-shared -Wl,-soname,luamod.so \
+	      -Wl,-z,max-page-size=0x1000 -Wl,--no-dynamic-linker \
+	      -mno-red-zone -fno-stack-protector \
+	      -o $@ build/libvibc/libluamod.o -lgcc
+
 # libulib.so.1 — ET_DYN version of ulib. PIC build; exports the
 # same API as libulib.a. Used by dynamic binaries via DT_NEEDED.
 build/libulib/ulib.pic.o: user/ulib.c user/ulib.h user/syscall_x64.h
@@ -214,15 +228,18 @@ build/lua/linit_lighthos.o: user/linit_lighthos.c user/luaconf_lighthos.h
 
 $(BUILD_USER)/lua: $(BUILD_USER)/crt0.o $(LUA_OBJS) \
                    build/lua/linit_lighthos.o build/lua/lua_main.o \
-                   build/sysroot/usr/lib/libvibc.a \
-                   build/sysroot/usr/lib/libulib.a
+                   build/sysroot/usr/lib/libvibc.so.1 \
+                   build/sysroot/usr/lib/libulib.so.1
 	@mkdir -p $(dir $@)
-	x86_64-elf-ld -T user/user.ld -nostdlib -static \
-	    -o $@ $(BUILD_USER)/crt0.o $(LUA_OBJS) \
-	    build/lua/linit_lighthos.o build/lua/lua_main.o \
-	    build/sysroot/usr/lib/libvibc.a \
-	    build/sysroot/usr/lib/libulib.a \
-	    build/sysroot/usr/lib/libvibc.a
+	$(CC) -T user/user.ld -nostdlib -ffreestanding \
+	      -Wl,--dynamic-linker=/lib/ld-lighthos.so.1 \
+	      -Wl,--no-as-needed \
+	      -Wl,--export-dynamic \
+	      -Wl,-rpath-link,build/sysroot/usr/lib \
+	      -mno-red-zone -fno-stack-protector \
+	      -o $@ $(BUILD_USER)/crt0.o $(LUA_OBJS) \
+	      build/lua/linit_lighthos.o build/lua/lua_main.o \
+	      -Lbuild/sysroot/usr/lib -lvibc -lulib -lgcc
 
 # Targets with their own recipes below (shell) get filtered out.
 $(filter-out $(BUILD_USER)/shell,$(X64_USER_TARGETS)): $(BUILD_USER)/%: $(BUILD_USER)/crt0.o $(BUILD_USER)/%.o
@@ -553,6 +570,7 @@ build/lighthos-test.iso: $(KERNEL_BIN) grub-test.cfg x64-userland \
                          build/sysroot/usr/lib/libulib.so.1 \
                          build/sysroot/usr/lib/libvibc.so.1 \
                          build/sysroot/usr/lib/ld-lighthos.so.1 \
+                         build/sysroot/usr/lib/luamod.so \
                          $(TEST_VSH)
 	@mkdir -p build/iso-test/boot/grub build/iso-test/boot/tests build/iso-test/boot/lib
 	cp $(KERNEL_BIN) build/iso-test/boot/lighthos.bin
@@ -567,6 +585,7 @@ build/lighthos-test.iso: $(KERNEL_BIN) grub-test.cfg x64-userland \
 	cp build/sysroot/usr/lib/libulib.so.1   build/iso-test/boot/lib/libulib.so.1
 	cp build/sysroot/usr/lib/libvibc.so.1   build/iso-test/boot/lib/libvibc.so.1
 	cp build/sysroot/usr/lib/ld-lighthos.so.1 build/iso-test/boot/lib/ld-lighthos.so.1
+	cp build/sysroot/usr/lib/luamod.so       build/iso-test/boot/lib/luamod.so
 	@for f in $(TEST_VSH); do cp $$f build/iso-test/boot/tests/; done
 	grub-mkrescue -o $@ build/iso-test 2>/dev/null
 
