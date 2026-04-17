@@ -391,6 +391,10 @@ static int run_script(const char *path) {
 #define K_RIGHT  0x84
 #define K_HOME   0x85
 #define K_END    0x86
+#define K_CUP    0x91
+#define K_CDOWN  0x92
+#define K_CLEFT  0x93
+#define K_CRIGHT 0x94
 #define K_DEL    0x95
 
 #define HIST_MAX 32
@@ -417,20 +421,46 @@ static const char *hist_get(int i) {
     return hist[slot];
 }
 
-/* Repaint the editable portion of the input line. Assumes the
-   prompt has already been printed. Clears from the start of the
-   editable region to EOL, then writes the new buffer. */
-static void repaint(const char *buf, int old_len, int new_len) {
-    /* Move left `old_len` times to the start of input. */
-    for (int i = 0; i < old_len; i++) u_putc('\b');
-    /* Write new buffer. */
+/* Redraw the editable region assuming the cursor was at `old_pos`
+   characters past the start of input, the old buffer was `old_len`
+   wide, and the new buffer is `new_len` wide. Positions the cursor
+   at `new_pos` on exit. Uses only \b and ESC[K so it works on the
+   most minimal terminal. */
+static void repaint_at(const char *buf, int old_pos, int old_len,
+                       int new_len, int new_pos) {
+    /* Cursor back to start of input. */
+    for (int i = 0; i < old_pos; i++) u_putc('\b');
+    /* Write the new buffer. */
     for (int i = 0; i < new_len; i++) u_putc(buf[i]);
-    /* If old was longer, pad with spaces + backspace to erase tail. */
+    /* Erase tail if old was longer. */
     if (old_len > new_len) {
         int tail = old_len - new_len;
         for (int i = 0; i < tail; i++) u_putc(' ');
         for (int i = 0; i < tail; i++) u_putc('\b');
     }
+    /* Cursor back to new_pos. */
+    for (int i = new_len; i > new_pos; i--) u_putc('\b');
+}
+
+/* Convenience: backward-compat wrapper for callers that used to
+   repaint the whole editable region (cursor is always at end). */
+static void repaint(const char *buf, int old_len, int new_len) {
+    repaint_at(buf, old_len, old_len, new_len, new_len);
+}
+
+/* Word-boundary helpers. A "word" is a run of non-whitespace chars. */
+static int word_left(const char *buf, int pos) {
+    if (pos <= 0) return 0;
+    int i = pos - 1;
+    while (i > 0 && (buf[i] == ' ' || buf[i] == '\t')) i--;
+    while (i > 0 && buf[i - 1] != ' ' && buf[i - 1] != '\t') i--;
+    return i;
+}
+static int word_right(const char *buf, int pos, int len) {
+    int i = pos;
+    while (i < len && buf[i] != ' ' && buf[i] != '\t') i++;
+    while (i < len && (buf[i] == ' ' || buf[i] == '\t')) i++;
+    return i;
 }
 
 /* Find the start of the last whitespace-delimited token in `buf[..len]`.
@@ -484,21 +514,26 @@ static int tab_complete(char *buf, int *len) {
         if (*len < LINE_MAX - 1) { buf[(*len)++] = ' '; u_putc(' '); }
         return 1;
     }
-    /* Multiple: list them, redraw prompt+buffer. */
-    u_putc('\n');
+    /* Multiple: list them, redraw prompt+buffer. Explicit \r\n because
+       the serial driver is in raw mode during readline — no \n→\r\n
+       translation anymore. */
+    u_putc('\r'); u_putc('\n');
     for (int i = 0; i < nmatches; i++) {
         u_puts_n(matches[i]); u_putc('\t');
     }
-    u_putc('\n');
+    u_putc('\r'); u_putc('\n');
     u_puts_n("$ ");
     for (int i = 0; i < *len; i++) u_putc(buf[i]);
     return 1;
 }
 
-/* Read a line with history + tab completion. Returns length (not
-   counting NUL), 0 on EOF. */
+/* Read a line with history + tab completion + line editing. The
+   serial driver is in raw mode for the duration (see run_interactive),
+   so we own the cursor and do all our own echo. Returns length (not
+   counting NUL), 0 on EOF, -1 on read error. */
 static long shell_readline(char *buf, int cap) {
     int len = 0;
+    int pos = 0;                /* cursor index into buf */
     int hist_pos = -1;          /* -1 = live buffer; 0..n = history entry */
     char saved[LINE_MAX];       /* snapshot of live buffer when walking history */
     int  saved_len = 0;
@@ -510,28 +545,104 @@ static long shell_readline(char *buf, int cap) {
         if (n == 0) return 0;
 
         unsigned char uc = (unsigned char)c;
-        if (uc == '\n') {
+
+        /* Enter: commit the line. Print the newline ourselves (kernel
+           doesn't in raw mode) and return. */
+        if (uc == '\n' || uc == '\r') {
+            u_putc('\r'); u_putc('\n');
             buf[len] = 0;
             return len;
         }
+
+        /* Backspace / Ctrl-H: delete char before cursor. */
         if (uc == '\b' || uc == 0x7F) {
-            if (len > 0) len--;   /* kernel already painted the rub-out */
+            if (pos > 0) {
+                int old_len = len;
+                for (int i = pos - 1; i < len - 1; i++) buf[i] = buf[i + 1];
+                len--;
+                repaint_at(buf, pos, old_len, len, pos - 1);
+                pos--;
+            }
             continue;
         }
+
+        /* Delete: remove char under cursor. */
+        if (uc == K_DEL) {
+            if (pos < len) {
+                int old_len = len;
+                for (int i = pos; i < len - 1; i++) buf[i] = buf[i + 1];
+                len--;
+                repaint_at(buf, pos, old_len, len, pos);
+            }
+            continue;
+        }
+
+        /* Ctrl-A / Home. */
+        if (uc == K_HOME || uc == 0x01) {
+            while (pos > 0) { u_putc('\b'); pos--; }
+            continue;
+        }
+        /* Ctrl-E / End. */
+        if (uc == K_END || uc == 0x05) {
+            while (pos < len) { u_putc(buf[pos]); pos++; }
+            continue;
+        }
+        /* Ctrl-U: kill whole line. */
+        if (uc == 0x15) {
+            int old_len = len;
+            len = 0;
+            repaint_at(buf, pos, old_len, 0, 0);
+            pos = 0;
+            continue;
+        }
+        /* Ctrl-K: kill to EOL. */
+        if (uc == 0x0B) {
+            int old_len = len;
+            len = pos;
+            repaint_at(buf, pos, old_len, len, pos);
+            continue;
+        }
+
+        if (uc == K_LEFT) {
+            if (pos > 0) { u_putc('\b'); pos--; }
+            continue;
+        }
+        if (uc == K_RIGHT) {
+            if (pos < len) { u_putc(buf[pos]); pos++; }
+            continue;
+        }
+
+        /* Word navigation: Ctrl-Left / Ctrl-Right (modifier 5). */
+        if (uc == K_CLEFT) {
+            int target = word_left(buf, pos);
+            while (pos > target) { u_putc('\b'); pos--; }
+            continue;
+        }
+        if (uc == K_CRIGHT) {
+            int target = word_right(buf, pos, len);
+            while (pos < target) { u_putc(buf[pos]); pos++; }
+            continue;
+        }
+
         if (uc == '\t') {
+            /* Tab only operates at end-of-line for now — move cursor
+               there, then let the existing completer run. */
+            while (pos < len) { u_putc(buf[pos]); pos++; }
             tab_complete(buf, &len);
+            pos = len;
             continue;
         }
+
         if (uc == K_UP || uc == K_DOWN) {
-            int new_pos = hist_pos + (uc == K_UP ? 1 : -1);
-            if (new_pos < -1 || new_pos >= hist_count) continue;
+            int new_hist = hist_pos + (uc == K_UP ? 1 : -1);
+            if (new_hist < -1 || new_hist >= hist_count) continue;
             if (hist_pos == -1) {
-                /* Leaving live buffer — save it. */
                 for (int i = 0; i < len; i++) saved[i] = buf[i];
                 saved_len = len;
             }
-            hist_pos = new_pos;
+            hist_pos = new_hist;
             int old_len = len;
+            int old_pos = pos;
             if (hist_pos == -1) {
                 for (int i = 0; i < saved_len; i++) buf[i] = saved[i];
                 len = saved_len;
@@ -541,14 +652,28 @@ static long shell_readline(char *buf, int cap) {
                 while (h[i] && i < cap - 1) { buf[i] = h[i]; i++; }
                 len = i;
             }
-            repaint(buf, old_len, len);
+            pos = len;
+            repaint_at(buf, old_pos, old_len, len, pos);
             continue;
         }
-        /* Ignore other control bytes (left/right/home/end/del). */
+
+        /* Drop remaining control / extended bytes. */
         if (uc < 0x20 || uc >= 0x80) continue;
+
+        /* Printable: insert at cursor, echo the change. */
         if (len < cap - 1) {
-            buf[len++] = (char)uc;
-            /* kernel echoed it already */
+            for (int i = len; i > pos; i--) buf[i] = buf[i - 1];
+            buf[pos] = (char)uc;
+            len++;
+            if (pos == len - 1) {
+                u_putc(uc);
+            } else {
+                /* Mid-line insert: rewrite from pos to end, then
+                   restore cursor. */
+                int old_len = len - 1;
+                repaint_at(buf, pos, old_len, len, pos + 1);
+            }
+            pos++;
         }
     }
 }
@@ -605,9 +730,11 @@ static int run_interactive(void) {
     char expanded[LINE_MAX];
     for (;;) {
         u_puts_n("$ ");
+        sys_tty_raw(1);                /* own echo + line editing */
         long n = shell_readline(line, sizeof(line));
+        sys_tty_raw(0);                /* spawned children want cooked mode */
         if (n < 0) return 1;
-        if (n == 0) { u_putc('\n'); continue; }
+        if (n == 0) continue;
         hist_push(line);
         if (expand_vars(line, expanded, sizeof(expanded)) == 0) {
             run_line(expanded);
