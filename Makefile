@@ -53,7 +53,7 @@ DISK_IMG        = build/disk.img
 # X64_USER       — union; what X64_USER_TARGETS + per-binary linker
 #                  rules iterate.
 X64_USER_TEST   = runtests assert forktest fstest mmaptest envtest \
-                  sigtest alarmtest \
+                  sigtest alarmtest segv \
                   test_pid test_fork test_fs test_stream test_pgroup test_xmm \
                   test_winsize
 X64_USER_PROD   = hello shell bomb find rm stty \
@@ -710,9 +710,14 @@ test-disk:
 	      -display none -serial file:build/test-output.log -m 128M -no-reboot \
 	      -device isa-debug-exit,iobase=0x604,iosize=0x04 \
 	      </dev/null >/dev/null 2>&1; true
-	@if grep -qE 'KERNEL PANIC|Exception:' build/test-output.log; then \
+	@# Gate only on KERNEL PANIC, not bare "Exception:". Ring-3
+	@# CPU exceptions are now a normal, expected outcome — the ISR
+	@# dumps registers and terminates just the faulter. Bailing on
+	@# every dump_exception line would reject legitimate SIGSEGV
+	@# paths that user programs can now rely on.
+	@if grep -q 'KERNEL PANIC' build/test-output.log; then \
 	  grep -E '^(=== |PASS |FAIL |Exception|KERNEL PANIC)' build/test-output.log; \
-	  echo "KERNEL FAULT"; exit 1; \
+	  echo "KERNEL PANIC"; exit 1; \
 	fi
 	@# Gate: the kernel symbol-table self-probe in kernel_main must
 	@# have resolved its own address back to 'kernel_main'. Any drift
