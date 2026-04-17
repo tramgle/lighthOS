@@ -318,16 +318,46 @@ sighandler_t signal(int signo, sighandler_t handler) {
     /* Kernel-side disposition: SIG_DFL/SIG_IGN pass straight through
        (the kernel interprets 0 and 1 specially and never calls the
        trampoline for them). Anything else uses our thunk. */
-    uint32_t karg;
+    uintptr_t karg;
     if (handler == SIG_DFL) karg = 0;
     else if (handler == SIG_IGN) karg = 1;
-    else karg = (uint32_t)_ulib_sig_thunk;
+    else karg = (uintptr_t)_ulib_sig_thunk;
 
-    int32_t rc = sys_signal(signo, (void (*)(int))karg);
+    long rc = sys_signal(signo, (void (*)(int))karg);
     if (rc < 0) {
         /* Kernel rejected (uncatchable or invalid) — roll back. */
         _user_sighandlers[signo] = prev;
         return SIG_ERR;
     }
     return prev ? prev : SIG_DFL;
+}
+
+/* Heap-growth primitive for libc/malloc.c. sbrk-style: each call
+   advances the user heap by `delta` bytes and returns the old
+   break (pre-grow pointer). Backed by an mmap_anon arena that
+   grows 64 KiB at a time. Not thread-safe (we don't have threads). */
+long sys_sbrk(long delta) {
+    static uint8_t *heap_cur = 0;
+    static uint8_t *heap_end = 0;
+    static uint64_t arena_next = 0x50000000ULL;
+    const long CHUNK = 0x10000;                /* 64 KiB */
+
+    if (!heap_cur) {
+        long got = sys_mmap_anon((void *)arena_next, CHUNK, PROT_READ | PROT_WRITE);
+        if (got < 0) return -1;
+        heap_cur = (uint8_t *)(uintptr_t)got;
+        heap_end = heap_cur + CHUNK;
+        arena_next += CHUNK;
+    }
+    if (delta <= 0) return (long)(uintptr_t)heap_cur;
+    while (heap_cur + delta > heap_end) {
+        long got = sys_mmap_anon((void *)arena_next, CHUNK, PROT_READ | PROT_WRITE);
+        if (got < 0) return -1;
+        if ((uint64_t)got != arena_next) return -1;
+        heap_end += CHUNK;
+        arena_next += CHUNK;
+    }
+    long ret = (long)(uintptr_t)heap_cur;
+    heap_cur += delta;
+    return ret;
 }

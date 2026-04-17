@@ -98,11 +98,20 @@ X64_USER        = hello forktest fstest \
                   mount umount chroot mmaptest env envtest \
                   sigtest alarmtest strace \
                   test_pid test_fork test_fs test_stream
+# Simple single-source user targets built via the pattern rule below.
 X64_USER_TARGETS = $(addprefix $(BUILD_USER)/,$(X64_USER))
+# Multi-object user targets (own build rules above): lua. Added to
+# the ISO staging list explicitly.
+X64_USER_EXTRA = $(BUILD_USER)/lua
 
 X64_USER_CFLAGS = -std=gnu99 -ffreestanding -O2 -Wall -Wextra -nostdlib \
                   -mno-red-zone -mno-sse -mno-mmx -mno-sse2 \
                   -mgeneral-regs-only -fno-stack-protector
+# libvibc / lua need floats — they get SSE through X64_LIBC_CFLAGS
+# below, which relies on CR4.OSFXSR being set in boot.s.
+X64_LIBC_CFLAGS = -std=gnu99 -ffreestanding -O2 -Wall -Wextra -nostdlib \
+                  -mno-red-zone -fno-stack-protector \
+                  -Iuser -Iuser/libc/include
 
 $(BUILD_USER)/crt0.o: user/crt0.s
 	@mkdir -p $(dir $@)
@@ -112,12 +121,82 @@ $(BUILD_USER)/%.o: user/%.c user/syscall_x64.h
 	@mkdir -p $(dir $@)
 	$(CC) $(X64_USER_CFLAGS) -c $< -o $@
 
+# libulib.a: packaging of user/ulib.c. Compiled *with SSE* so
+# libc clients that return doubles link cleanly against it.
+$(BUILD_USER)/libulib/ulib.o: user/ulib.c user/ulib.h user/syscall_x64.h
+	@mkdir -p $(dir $@)
+	$(CC) $(X64_LIBC_CFLAGS) -c $< -o $@
+
+build/sysroot/usr/lib/libulib.a: $(BUILD_USER)/libulib/ulib.o
+	@mkdir -p $(dir $@)
+	$(AR) rcs $@ $^
+
+# libvibc.a: our subset libc. Compiled with SSE so strtod /
+# snprintf's %f can return doubles via XMM0.
+LIBVIBC_SRC = user/libc/mem.c user/libc/ctype.c user/libc/errno.c \
+              user/libc/locale.c user/libc/string_extra.c \
+              user/libc/strtod.c user/libc/snprintf.c user/libc/malloc.c \
+              user/libc/stdio.c user/libc/misc.c
+LIBVIBC_OBJS = $(patsubst user/libc/%.c,build/libvibc/%.o,$(LIBVIBC_SRC)) \
+               build/libvibc/setjmp.o
+
+build/libvibc/%.o: user/libc/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(X64_LIBC_CFLAGS) -c $< -o $@
+
+build/libvibc/setjmp.o: user/libc/setjmp.s
+	@mkdir -p $(dir $@)
+	nasm -f elf64 $< -o $@
+
+build/sysroot/usr/lib/libvibc.a: $(LIBVIBC_OBJS)
+	@mkdir -p $(dir $@)
+	$(AR) rcs $@ $^
+
+# Lua: pull vendored sources from third_party/lua; compile + static
+# link against libvibc + libulib. linit_lighthos + lua_main are the
+# custom entry points.
+LUA_SRC_DIR = third_party/lua/src
+LUA_CORE = lapi lcode lctype ldebug ldo ldump lfunc lgc llex lmem lobject \
+           lopcodes lparser lstate lstring ltable ltm lundump lvm lzio
+LUA_LIB  = lauxlib lbaselib lmathlib lstrlib ltablib liolib loslib lcorolib lutf8lib
+LUA_OBJS = $(addprefix build/lua/, $(addsuffix .o, $(LUA_CORE) $(LUA_LIB)))
+
+LUA_CFLAGS = $(X64_LIBC_CFLAGS) -I$(LUA_SRC_DIR) \
+             -include user/luaconf_lighthos.h \
+             -Wno-unused-parameter -Wno-unused-function -Wno-sign-compare \
+             -Wno-implicit-fallthrough -Wno-parentheses -Wno-empty-body \
+             -Wno-maybe-uninitialized -Wno-unused-but-set-variable
+
+build/lua/%.o: $(LUA_SRC_DIR)/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(LUA_CFLAGS) -c $< -o $@
+
+build/lua/lua_main.o: user/lua_main.c
+	@mkdir -p $(dir $@)
+	$(CC) $(LUA_CFLAGS) -c $< -o $@
+
+build/lua/linit_lighthos.o: user/linit_lighthos.c
+	@mkdir -p $(dir $@)
+	$(CC) $(LUA_CFLAGS) -c $< -o $@
+
+$(BUILD_USER)/lua: $(BUILD_USER)/crt0.o $(LUA_OBJS) \
+                   build/lua/linit_lighthos.o build/lua/lua_main.o \
+                   build/sysroot/usr/lib/libvibc.a \
+                   build/sysroot/usr/lib/libulib.a
+	@mkdir -p $(dir $@)
+	x86_64-elf-ld -T user/user.ld -nostdlib -static \
+	    -o $@ $(BUILD_USER)/crt0.o $(LUA_OBJS) \
+	    build/lua/linit_lighthos.o build/lua/lua_main.o \
+	    build/sysroot/usr/lib/libvibc.a \
+	    build/sysroot/usr/lib/libulib.a \
+	    build/sysroot/usr/lib/libvibc.a
+
 $(X64_USER_TARGETS): $(BUILD_USER)/%: $(BUILD_USER)/crt0.o $(BUILD_USER)/%.o
 	@mkdir -p $(dir $@)
 	x86_64-elf-ld -T user/user.ld -nostdlib -o $@ $^
 
 .PHONY: x64-userland
-x64-userland: $(X64_USER_TARGETS)
+x64-userland: $(X64_USER_TARGETS) $(BUILD_USER)/lua
 
 .PHONY: all clean iso run run-disk run-vga debug docker-build docker-run test docker-test iso-ready user-programs fix-perms docker-lua-compile bootdisk run-bootdisk docker-bootdisk docker-disk test-iso docker-test-iso test-disk docker-test-disk run-installed
 
@@ -334,11 +413,11 @@ docker-test:
 
 TEST_VSH = $(wildcard tests/*.vsh)
 
-build/lighthos-test.iso: $(KERNEL_BIN) grub-test.cfg x64-userland $(TEST_VSH)
+build/lighthos-test.iso: $(KERNEL_BIN) grub-test.cfg x64-userland $(X64_USER_EXTRA) $(TEST_VSH)
 	@mkdir -p build/iso-test/boot/grub build/iso-test/boot/tests
 	cp $(KERNEL_BIN) build/iso-test/boot/lighthos.bin
 	cp grub-test.cfg build/iso-test/boot/grub/grub.cfg
-	@for f in $(X64_USER_TARGETS); do \
+	@for f in $(X64_USER_TARGETS) $(X64_USER_EXTRA); do \
 	    name=$$(basename $$f); \
 	    cp $$f build/iso-test/boot/$$name; \
 	done

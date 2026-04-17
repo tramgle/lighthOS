@@ -179,6 +179,17 @@ long_mode_entry:
     mov gs, ax
     mov ss, ax
 
+    ; Enable SSE so user-space compilers can return doubles via
+    ; XMM0 (ABI). CR0: clear EM (bit 2), set MP (bit 1).
+    ; CR4: set OSFXSR (bit 9) + OSXMMEXCPT (bit 10).
+    mov rax, cr0
+    and rax, ~(1 << 2)                  ; clear EM
+    or  rax, (1 << 1)                   ; set MP
+    mov cr0, rax
+    mov rax, cr4
+    or  rax, (1 << 9) | (1 << 10)       ; OSFXSR + OSXMMEXCPT
+    mov cr4, rax
+
     ; Jump to higher-half VMA for the rest of the kernel.
     mov rax, higher_half_entry
     jmp rax

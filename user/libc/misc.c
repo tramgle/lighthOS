@@ -37,7 +37,7 @@ void __libc_assert_fail(const char *expr, const char *file, int line) {
 
 /* --- time --- */
 
-uint32_t sys_time(void);
+/* sys_time declared in syscall_x64.h via ulib.h include chain. */
 
 long time(long *t) {
     /* SYS_TIME returns 100 Hz ticks since boot. Translate to seconds. */

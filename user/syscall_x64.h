@@ -184,6 +184,10 @@ static inline long sys_kill(int pid, int signo) {
 static inline long sys_signal_raw(int signo, void (*handler)(int)) {
     return _syscall2(SYS_SIGNAL, signo, (long)(uintptr_t)handler);
 }
+/* Legacy name used by user/ulib.c's signal(); alias to raw. */
+static inline long sys_signal(int signo, void (*handler)(int)) {
+    return sys_signal_raw(signo, handler);
+}
 static inline long sys_alarm(unsigned secs) {
     return _syscall1(SYS_ALARM, secs);
 }
