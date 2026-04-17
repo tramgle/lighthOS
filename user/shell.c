@@ -80,8 +80,9 @@ static int fg_builtin(void) {
 }
 
 static int parse_line(char *line, struct stage *stages, int max_stages,
-                      int *redir_out, char **redir_path, int *background) {
-    *redir_out = 0; *redir_path = 0; *background = 0;
+                      int *redir_out, char **redir_path,
+                      char **redir_in, int *background) {
+    *redir_out = 0; *redir_path = 0; *redir_in = 0; *background = 0;
     int ns = 0;
     stages[0].argc = 0;
     char *p = line;
@@ -101,6 +102,15 @@ static int parse_line(char *line, struct stage *stages, int max_stages,
         if (*p == '&') {
             *background = 1;
             p++;
+            continue;
+        }
+        if (*p == '<') {
+            p++;
+            while (*p == ' ' || *p == '\t') p++;
+            char *start = p;
+            while (*p && *p != ' ' && *p != '\t' && *p != '\n') p++;
+            if (*p) { *p = 0; p++; }
+            *redir_in = start;
             continue;
         }
         if (*p == '>') {
@@ -124,8 +134,8 @@ static int parse_line(char *line, struct stage *stages, int max_stages,
         } else {
             tok = p;
             while (*p && *p != ' ' && *p != '\t' && *p != '\n' &&
-                   *p != '|' && *p != '>' && *p != '&') p++;
-            if (*p == '|' || *p == '>' || *p == '&') {
+                   *p != '|' && *p != '>' && *p != '<' && *p != '&') p++;
+            if (*p == '|' || *p == '>' || *p == '<' || *p == '&') {
                 /* leave separator for next iter; null-terminate in place */
                 char save = *p; *p = 0; *p = save;
             } else if (*p) {
@@ -155,6 +165,7 @@ static void resolve_path(const char *name, char *out, size_t cap) {
 
 static int run_pipeline(struct stage *stages, int nstages,
                         int redir_out, const char *redir_path,
+                        const char *redir_in,
                         int background, const char *raw_line) {
     int prev_read = -1;
     int pids[MAX_STAGES];
@@ -181,6 +192,12 @@ static int run_pipeline(struct stage *stages, int nstages,
             if (prev_read >= 0) {
                 sys_dup2(prev_read, 0);
                 sys_close(prev_read);
+            } else if (i == 0 && redir_in) {
+                /* First stage gets its stdin from `< file`. */
+                int ifd = sys_open(redir_in, O_RDONLY);
+                if (ifd < 0) sys_exit(126);
+                sys_dup2(ifd, 0);
+                if (ifd != 0) sys_close(ifd);
             }
             if (!is_last) {
                 sys_dup2(pfds[1], 1);
@@ -269,8 +286,10 @@ static int run_line(char *line) {
 
     struct stage stages[MAX_STAGES];
     int redir_out = 0; char *redir_path = 0;
+    char *redir_in = 0;
     int background = 0;
-    int ns = parse_line(line, stages, MAX_STAGES, &redir_out, &redir_path, &background);
+    int ns = parse_line(line, stages, MAX_STAGES, &redir_out, &redir_path,
+                        &redir_in, &background);
     if (ns <= 0) return 0;
     if (ns == 1 && stages[0].argc == 0) return 0;
 
@@ -310,13 +329,17 @@ static int run_line(char *line) {
             return 0;
         }
         if (u_strcmp(cmd, "bg") == 0) {
-            /* Resume the most recent stopped job (SIGCONT) and detach.
-               Our jobs[] only tracks backgrounded pids; stopped jobs
-               come from Ctrl-Z on a foreground process, which the
-               kernel set as STOPPED. Send SIGCONT to every tracked
-               job to cover both cases. */
+            /* Resume the most recent stopped job in the background.
+               jobs[i].pid is the pgid leader, so `kill(-pid, SIGCONT)`
+               wakes every stage of the pipeline. No tcsetpgrp — the
+               job stays in its own pgid but the shell keeps the
+               terminal. */
             for (int i = MAX_JOBS - 1; i >= 0; i--) {
-                if (jobs[i].alive) { sys_kill(jobs[i].pid, SIG_CONT); return 0; }
+                if (jobs[i].alive) {
+                    sys_kill(-jobs[i].pid, SIG_CONT);
+                    u_puts_n("[bg] "); u_puts_n(jobs[i].cmd); u_putc('\n');
+                    return 0;
+                }
             }
             u_puts_n("bg: no jobs\n");
             return 1;
@@ -364,7 +387,8 @@ static int run_line(char *line) {
             return rc;
         }
     }
-    return run_pipeline(stages, ns, redir_out, redir_path, background, saved);
+    return run_pipeline(stages, ns, redir_out, redir_path, redir_in,
+                        background, saved);
 }
 
 static int run_script(const char *path) {

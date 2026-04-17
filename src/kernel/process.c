@@ -1,16 +1,16 @@
-/* Minimal x86_64 process layer.
+/* x86_64 process layer.
  *
- * Pares the i386 process.c down to just what's needed to run real
- * user binaries + fork/wait/exec + console I/O:
- *   - process_t array (no linked lists; fixed MAX=8)
+ *   - process_t array, fixed PROCESS_MAX.
  *   - process_spawn_from_memory: build a PML4, load ELF, stack,
- *     argv/envp/auxv, schedule as a new task that iretq's to ring 3
- *   - process_fork: snapshot parent user pages, duplicate fd table
- *   - process_waitpid: block until child exits, reap status
- *   - process_exit: mark dead, yield
- *
- * Signals, pgid, chroot, pipes, strace, alarm — all deferred.
- * Future sessions will bring them back file-by-file.
+ *     argv/envp/auxv, schedule as a new task that iretq's to ring 3.
+ *   - process_spawn_from_path: read an ELF via VFS then hand off to
+ *     spawn_from_memory — backs SYS_SPAWN.
+ *   - process_fork: snapshot parent user pages, duplicate fd table.
+ *   - process_waitpid: block until child exits or stops (POSIX-style
+ *     stop-status encoding, low byte 0x7f).
+ *   - process_exit: mark dead, self-reap orphans, yield.
+ *   - Signals (user handlers + kernel-default for STOP/CONT/KILL),
+ *     pgroups, chroot, pipes, strace ring, alarm — all live.
  */
 
 #include "kernel/process.h"

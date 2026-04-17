@@ -466,12 +466,17 @@ mmap_done:
         break;
     }
 
-    case SYS_SPAWN:
-        /* Path-based spawn deferred: need to read ELF from fs.
-           For now a user wrapper can bundle ELF bytes via a separate
-           memory-spawn syscall when that becomes useful. */
-        regs->rax = (uint64_t)(int64_t)-1;
+    case SYS_SPAWN: {
+        /* Spawn a new process executing ELF at path `a1` with argv
+           `a2` (NULL-terminated). Returns child pid or -1. Uses the
+           same VFS-reading path as process_spawn_from_path, so it
+           covers ramfs + FAT alike. Detaches — no parent linkage. */
+        const char *p = resolve_path((const char *)(uintptr_t)a1);
+        char *const *argv = (char *const *)(uintptr_t)a2;
+        if (!p) { regs->rax = (uint64_t)(int64_t)-1; break; }
+        regs->rax = (uint64_t)(int64_t)process_spawn_from_path(p, argv);
         break;
+    }
 
     case SYS_TIME:
         regs->rax = timer_get_ticks();

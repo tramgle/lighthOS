@@ -33,7 +33,9 @@ int   unsetenv(const char *name);
    user/ulib.c (libulib.a). */
 long sys_sbrk(long delta);
 
-/* dlopen/dlsym deferred until ld.so port lands. */
+/* Thin dlopen/dlsym forwarders over the ld-lighthos.so.1 ops table
+   at DL_IFACE_ADDR. Defined in user/ulib.c; mirrored for libvibc
+   users in <dlfcn.h> (user/libc/dlfcn.c). */
 #define RTLD_LAZY    0x1
 #define RTLD_NOW     0x2
 #define RTLD_GLOBAL  0x4
