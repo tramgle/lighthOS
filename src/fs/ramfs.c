@@ -3,7 +3,7 @@
 #include "lib/string.h"
 #include "lib/kprintf.h"
 
-#define RAMFS_MAX_CHILDREN 64
+#define RAMFS_MAX_CHILDREN 256
 
 typedef struct ramfs_inode {
     char     name[VFS_MAX_NAME];

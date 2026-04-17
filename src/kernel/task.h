@@ -23,6 +23,11 @@ typedef struct task {
     uint64_t      stack_base;     /* kmalloc'd base (for free) */
     struct task  *next;
     uint64_t     *pml4;           /* per-process PML4 (virt via identity map) */
+    /* FPU/SSE state — FXSAVE emits 512 bytes, 16-byte aligned.
+       Initialized from a clean default on task_alloc; swapped in
+       schedule() so user-space XMM usage doesn't leak across
+       tasks. */
+    uint8_t       fxstate[512] __attribute__((aligned(16)));
 } task_t;
 
 void    task_init(void);

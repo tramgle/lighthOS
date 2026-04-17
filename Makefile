@@ -97,7 +97,7 @@ X64_USER        = hello forktest fstest \
                   echo cat wc head tail grep cp mv touch ls sleep mkdir \
                   mount umount chroot mmaptest env envtest \
                   sigtest alarmtest strace \
-                  test_pid test_fork test_fs test_stream test_pgroup
+                  test_pid test_fork test_fs test_stream test_pgroup test_xmm
 # Simple single-source user targets built via the pattern rule below.
 X64_USER_TARGETS = $(addprefix $(BUILD_USER)/,$(X64_USER))
 # Multi-object user targets (own build rules above): lua. Added to
@@ -120,6 +120,12 @@ $(BUILD_USER)/crt0.o: user/crt0.s
 $(BUILD_USER)/%.o: user/%.c user/syscall_x64.h
 	@mkdir -p $(dir $@)
 	$(CC) $(X64_USER_CFLAGS) -c $< -o $@
+
+# test_xmm uses movdqa inline asm on xmm0 so the compiler has to
+# know SSE is allowed (operand constraint "xmm" and the clobber).
+$(BUILD_USER)/test_xmm.o: user/test_xmm.c user/syscall_x64.h
+	@mkdir -p $(dir $@)
+	$(CC) $(X64_LIBC_CFLAGS) -c $< -o $@
 
 # libulib.a: packaging of user/ulib.c. Compiled *with SSE* so
 # libc clients that return doubles link cleanly against it.

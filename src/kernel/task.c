@@ -44,6 +44,8 @@ void task_init(void) {
     t->stack_base = 0;
     t->next = t;
     t->pml4 = vmm_kernel_pml4();
+    /* Clean default FPU/SSE state for the idle task. */
+    __asm__ volatile ("fninit; fxsave (%0)" :: "r"(t->fxstate) : "memory");
 
     current = t;
     ready_head = t;
@@ -92,6 +94,16 @@ task_t *task_alloc(const char *name) {
     if (!t->stack_base) { kprintf("task_alloc: stack OOM\n"); return 0; }
     memset((void *)(uintptr_t)t->stack_base, 0, TASK_STACK_SIZE);
     t->rsp = 0;
+
+    /* Default FPU/SSE state. MXCSR=0x1F80 (default masks), FPU
+       control word=0x037F, status/tag words zero. The simplest
+       way to get a known-good FXSAVE image is to FNINIT + FXSAVE.
+       Do it here so new tasks start with a fresh x87/SSE state. */
+    {
+        uint8_t tmp[512] __attribute__((aligned(16)));
+        __asm__ volatile ("fninit; fxsave (%0)" :: "r"(tmp) : "memory");
+        for (int i = 0; i < 512; i++) t->fxstate[i] = tmp[i];
+    }
     return t;
 }
 
@@ -189,9 +201,13 @@ registers_t *schedule(registers_t *regs) {
     if (next == current && current->state == TASK_DEAD) panic("No runnable tasks");
 
     if (next != current) {
+        /* Save outgoing task's FPU/SSE state and load incoming's.
+           CR4.OSFXSR was set in boot.s so FXSAVE/FXRSTOR are legal. */
+        __asm__ volatile ("fxsave (%0)" :: "r"(current->fxstate) : "memory");
         if (current->state == TASK_RUNNING) current->state = TASK_READY;
         current = next;
         current->state = TASK_RUNNING;
+        __asm__ volatile ("fxrstor (%0)" :: "r"(current->fxstate) : "memory");
         if (current->stack_base) {
             tss_set_kernel_stack(current->stack_base + TASK_STACK_SIZE);
         }
