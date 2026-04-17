@@ -7,16 +7,37 @@
  *   lua -i                — force REPL (after -e or a script)
  *   lua -v                — print version + exit
  *   lua --                — end option processing
- * No signal handling, no readline, no -l library loading (needs
- * dlfcn + package — gated on those). */
+ * Ctrl-C during a running chunk raises a Lua error via a debug hook
+ * (ported from stock lua.c's laction); the REPL catches it and keeps
+ * going. No readline, no -l library loading. */
 
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <signal.h>
 #include "lua.h"
 #include "lauxlib.h"
 #include "lualib.h"
+
+/* See stock lua.c:lstop/laction. On SIGINT: reset the handler to
+   SIG_DFL (so a second Ctrl-C really exits), then set a one-shot
+   hook that runs on the next VM tick and raises a Lua error. That
+   bubbles up through lua_pcall to docall's caller (the REPL loop),
+   which prints "interrupted!" and re-prompts. */
+static lua_State *g_lua;
+
+static void lstop(lua_State *L, lua_Debug *ar) {
+    (void)ar;
+    lua_sethook(L, 0, 0, 0);
+    luaL_error(L, "interrupted!");
+}
+
+static void laction(int sig) {
+    int flags = LUA_MASKCALL | LUA_MASKRET | LUA_MASKCOUNT;
+    signal(sig, SIG_DFL);
+    lua_sethook(g_lua, lstop, flags, 1);
+}
 
 static void l_message(const char *pname, const char *msg) {
     if (pname) fprintf(stderr, "%s: ", pname);
@@ -49,7 +70,10 @@ static int docall(lua_State *L, int narg, int nres) {
     int base = lua_gettop(L) - narg;
     lua_pushcfunction(L, msghandler);
     lua_insert(L, base);
+    g_lua = L;
+    signal(SIGINT, laction);       /* arm Ctrl-C → lstop */
     int status = lua_pcall(L, narg, nres, base);
+    signal(SIGINT, SIG_DFL);       /* disarm outside chunk execution */
     lua_remove(L, base);
     return status;
 }
