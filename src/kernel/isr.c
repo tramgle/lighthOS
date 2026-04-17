@@ -95,16 +95,11 @@ static void dump_exception(registers_t *regs) {
 static registers_t *user_fault_terminate(registers_t *regs, int signo) {
     process_t *p = process_current();
 
-    uint64_t cr2 = 0;
-    if (regs->int_no == 14) __asm__ volatile ("mov %%cr2, %0" : "=r"(cr2));
-
-    uint64_t off = 0;
-    const char *sym = ksym_lookup(regs->rip, &off);
-    serial_printf("[fault] pid=%u name=%s sig=%d int=%lu err=0x%lx rip=0x%lx%s%s%s cr2=0x%lx\n",
-                  p ? p->pid : 0, p ? p->name : "?", signo,
-                  regs->int_no, regs->err_code, regs->rip,
-                  sym ? " (" : "", sym ? sym : "", sym ? ")" : "",
-                  cr2);
+    /* dump_exception already printed the full register frame + rip
+       symbol. This line is a compact summary keyed on pid / signo so
+       grepping the log for [fault] gives you one entry per crash. */
+    serial_printf("[fault] pid=%u name=%s sig=%d\n",
+                  p ? p->pid : 0, p ? p->name : "?", signo);
 
     if (p) {
         p->exit_code = 128 + signo;
@@ -113,7 +108,9 @@ static registers_t *user_fault_terminate(registers_t *regs, int signo) {
     }
 
     /* Hand the scheduler a fresh frame. Without this the CPU would
-       iretq back to the faulting rip and trap again immediately. */
+       iretq back to the faulting rip and trap again immediately. The
+       idle task is always READY, so schedule() always finds at least
+       one runnable task after we marked `current` DEAD. */
     return schedule(regs);
 }
 

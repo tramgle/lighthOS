@@ -60,6 +60,12 @@ static void kputchar(char c, bool to_vga, bool to_serial) {
         serial_putchar(c);
     }
     if (boot_log_on) {
+        /* Non-atomic read-modify-write on boot_log_head. Safe on the
+           single-CPU kernel (IRQ handlers run to completion with IF
+           cleared, so a timer/keyboard IRQ kprintf between LOAD and
+           STORE is impossible). Becomes a data race as soon as SMP
+           lands — fix by wrapping in an atomic-fetch-add once the
+           locking primitives are in. */
         boot_log_buf[boot_log_head++] = c;
         if (boot_log_head >= BOOT_LOG_MAX) {
             boot_log_head = 0;

@@ -79,14 +79,19 @@ static vfs_node_t *new_node(const char *name, uint32_t type,
     return v;
 }
 
+/* Parse an unsigned-decimal pid string. Rejects the empty string,
+ * non-digits, and anything that would overflow uint32_t — otherwise a
+ * pathological "/proc/99999999999" request would wrap silently and
+ * hit an unrelated live pid. */
 static int is_all_digits(const char *s, uint32_t *val_out) {
     if (!s || !*s) return 0;
-    uint32_t v = 0;
+    uint64_t v = 0;
     for (const char *p = s; *p; p++) {
         if (*p < '0' || *p > '9') return 0;
-        v = v * 10 + (uint32_t)(*p - '0');
+        v = v * 10 + (uint64_t)(*p - '0');
+        if (v > 0xFFFFFFFFu) return 0;
     }
-    *val_out = v;
+    *val_out = (uint32_t)v;
     return 1;
 }
 
@@ -159,6 +164,18 @@ static int compose_pid_status(uint32_t pid, char *out, int cap) {
     return p;
 }
 
+/* Append `max_len` bytes or up to the first NUL from `src` to `dst`,
+ * whichever comes first — same spirit as strnlen-before-strcpy. Used
+ * below to keep a corrupted or non-terminated spawn_argv_buf entry
+ * from walking past the buffer. */
+static int append_bounded(char *dst, int cap, int pos,
+                          const char *src, int max_len) {
+    for (int i = 0; i < max_len && src[i] && pos < cap - 1; i++) {
+        dst[pos++] = src[i];
+    }
+    return pos;
+}
+
 static int compose_pid_cmdline(uint32_t pid, char *out, int cap) {
     process_t *proc = process_get(pid);
     if (!proc) return 0;
@@ -176,8 +193,11 @@ static int compose_pid_cmdline(uint32_t pid, char *out, int cap) {
     for (int i = 0; i < argc && i < SPAWN_ARGV_MAX; i++) {
         uint64_t off = proc->spawn_argv_off[i];
         if (off >= SPAWN_ARGV_BUF) continue;
-        const char *s = &proc->spawn_argv_buf[off];
-        p = append_str(out, cap, p, s);
+        /* Cap the per-string read at the remaining buffer — if the
+           kernel's argv setup ever forgets a NUL, we still won't walk
+           past spawn_argv_buf. */
+        int limit = (int)(SPAWN_ARGV_BUF - off);
+        p = append_bounded(out, cap, p, &proc->spawn_argv_buf[off], limit);
         if (p < cap) out[p++] = '\0';
     }
     return p;
@@ -192,6 +212,7 @@ static ssize_t procfs_read(vfs_node_t *node, void *buf,
                            size_t size, off_t offset) {
     proc_node_t *pn = (proc_node_t *)node->private_data;
     if (!pn) return -1;
+    if (offset < 0) return -1;
 
     char tmp[1024];
     int len = 0;
@@ -203,14 +224,21 @@ static ssize_t procfs_read(vfs_node_t *node, void *buf,
     default: return -1;
     }
 
-    if (offset >= len) return 0;
-    size_t avail = (size_t)(len - (int)offset);
+    /* Compare as off_t both sides so callers supplying an offset
+       larger than any composer ever returns can't underflow avail. */
+    if (offset >= (off_t)len) return 0;
+    size_t avail = (size_t)((off_t)len - offset);
     if (size > avail) size = avail;
     memcpy(buf, tmp + offset, size);
     return (ssize_t)size;
 }
 
-/* readdir for root: static entries first, then live pids in slot order. */
+/* readdir for root: static entries first, then live pids in slot
+ * order. NOTE: process_info_at walks the processes[] array by live-
+ * slot index, so an exit + re-allocate between two readdir calls
+ * can renumber the pid sequence. Callers doing `ls /proc` under
+ * churn must accept the snapshot isn't stable — same contract as
+ * Linux /proc. */
 static int procfs_readdir(vfs_node_t *dir, uint32_t index,
                           char *name_out, uint32_t *type_out) {
     proc_node_t *pn = (proc_node_t *)dir->private_data;

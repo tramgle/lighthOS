@@ -15,6 +15,10 @@ static volatile uint64_t tick_count = 0;
 extern void process_tick_alarms(void);
 
 static registers_t *timer_callback(registers_t *regs) {
+    /* tick_count and p->[us]time_ticks are plain ++ and safe only
+       because the timer IRQ is the sole writer on a single-CPU
+       kernel. SMP will need atomic-fetch-add here (and a per-CPU
+       LAPIC timer driving this callback). */
     tick_count++;
     /* Attribute this tick to the currently-running process. We
        bucket by the interrupted frame's privilege (CS&3==3 =
