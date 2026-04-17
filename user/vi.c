@@ -5,11 +5,12 @@
 #include <string.h>
 #include "ulib_x64.h"
 
-/* libvibc exports printf + the FILE* surface but not the
-   bare-stdout puts/putchar — define them over sys_write so the
-   original vi source (which uses both) compiles unchanged. */
-static void puts(const char *s)    { sys_write(1, s, strlen(s)); }
-static void putchar(char c)        { sys_write(1, &c, 1); }
+/* Original i386 vi used a non-POSIX puts() that DIDN'T add a
+   trailing newline — it was emitting raw ANSI escapes. ISO-C puts
+   does append \n, so the source uses u_puts_n/u_putc (raw writes
+   without interpretation) via these short aliases. */
+#define puts(s)    u_puts_n(s)
+#define putchar(c) u_putc(c)
 
 #define SCREEN_ROWS 24   /* rows 0-23 for text */
 #define SCREEN_COLS 80

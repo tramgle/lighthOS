@@ -270,14 +270,15 @@ int fputc(int c, FILE *f) {
 }
 
 int putc(int c, FILE *f) { return fputc(c, f); }
-int putchar_lib(int c) { return fputc(c, stdout); }  /* avoid colliding with ulib's putchar */
+int putchar(int c)       { return fputc(c, stdout); }
 
 int fputs(const char *s, FILE *f) {
     size_t n = strlen(s);
     return (fwrite(s, 1, n, f) == n) ? 0 : EOF;
 }
 
-int puts_lib(const char *s) {
+/* ISO C: puts() writes the string AND a trailing newline. */
+int puts(const char *s) {
     if (fputs(s, stdout) != 0) return EOF;
     return fputc('\n', stdout);
 }

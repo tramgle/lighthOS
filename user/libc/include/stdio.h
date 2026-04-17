@@ -40,7 +40,9 @@ int    ungetc(int c, FILE *f);
 char  *fgets(char *out, int size, FILE *f);
 int    fputc(int c, FILE *f);
 int    putc(int c, FILE *f);
+int    putchar(int c);
 int    fputs(const char *s, FILE *f);
+int    puts(const char *s);
 
 int    fseek(FILE *f, long offset, int whence);
 long   ftell(FILE *f);

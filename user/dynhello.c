@@ -9,6 +9,6 @@
 
 int main(int argc, char **argv, char **envp) {
     (void)argc; (void)argv; (void)envp;
-    puts("hello from dynamic\n");
+    puts("hello from dynamic");
     return 0;
 }

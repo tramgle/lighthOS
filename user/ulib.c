@@ -56,12 +56,17 @@ void *memcpy(void *dest, const void *src, size_t n) {
     return dest;
 }
 
-void putchar(char c) {
-    sys_write(1, &c, 1);
-}
+static void local_putc(char c) { sys_write(1, &c, 1); }
 
-void puts(const char *s) {
+/* ISO-C puts/putchar. Weak so libvibc's full stdio-backed versions
+   win when both libs link (static binaries that want FILE* buffering),
+   while dynamic binaries that only DT_NEEDED libulib.so.1 still get a
+   working puts via these. */
+__attribute__((weak)) int putchar(int c) { local_putc((char)c); return c; }
+__attribute__((weak)) int puts(const char *s) {
     sys_write(1, s, strlen(s));
+    sys_write(1, "\n", 1);
+    return 0;
 }
 
 /* Render `val` in `base` to `buf` (at most 32 chars). Returns length. */
@@ -78,11 +83,11 @@ static int uint_to_buf(uint32_t val, int base, char *buf) {
 
 static void emit_padded(const char *buf, int len, int width, int left_align, char pad) {
     if (!left_align) {
-        for (int i = len; i < width; i++) putchar(pad);
+        for (int i = len; i < width; i++) local_putc(pad);
     }
-    for (int i = 0; i < len; i++) putchar(buf[i]);
+    for (int i = 0; i < len; i++) local_putc(buf[i]);
     if (left_align) {
-        for (int i = len; i < width; i++) putchar(' ');
+        for (int i = len; i < width; i++) local_putc(' ');
     }
 }
 
@@ -93,7 +98,7 @@ int printf(const char *fmt, ...) {
 
     for (; *fmt; fmt++) {
         if (*fmt != '%') {
-            putchar(*fmt);
+            local_putc(*fmt);
             count++;
             continue;
         }
@@ -156,10 +161,10 @@ int printf(const char *fmt, ...) {
             emit_padded(s, slen, width, left_align, ' ');
             break;
         }
-        case 'c': putchar((char)va_arg(args, int)); break;
-        case '%': putchar('%'); break;
+        case 'c': local_putc((char)va_arg(args, int)); break;
+        case '%': local_putc('%'); break;
         case '\0': va_end(args); return count;
-        default: putchar('%'); putchar(*fmt); break;
+        default: local_putc('%'); local_putc(*fmt); break;
         }
     }
     va_end(args);
