@@ -1,16 +1,32 @@
-/* runtests [dir] — walk `dir` (default /tests) and run every script
- * we recognize: *.vsh via /bin/shell, *.lua via /bin/lua. Tally the
- * PASS/FAIL assertion lines each script emits, report a summary,
- * shutdown.
+/* runtests [-k PATTERN] [-v] [dir]
  *
- * The host-side harness greps for "=== Summary:" to decide success.
- * PASS/FAIL lines for individual assertions go through stdout from
- * whichever runner the test is using (assert binary for .vsh;
- * tests/lua/testlib.lua for .lua). Pass/fail at the script level
- * here is derived from the child's exit code.
- */
+ * Walks `dir` (default /tests) and runs every script we recognize:
+ *     *.vsh  via /bin/shell
+ *     *.lua  via /bin/lua
+ * Tallies PASS/FAIL assertion lines each script emits, reports a
+ * summary, then shuts down. The host-side harness greps for
+ * "=== Summary:" to decide success; `=== OK <name>` / `=== FAIL <name>`
+ * prefixes feed the per-script regression gate.
+ *
+ * Flags:
+ *   -k PATTERN   only run scripts whose filename contains PATTERN
+ *                (substring match — not glob; keeps ulib lean)
+ *   -v           extra chatter (noise from tests themselves is fine
+ *                either way; flag is reserved for future use)
+ *
+ * Output shape:
+ *   === RUN  <name>
+ *   ... whatever the script prints ...
+ *   === OK   <name> (Nt)     or     === FAIL <name> (Nt) status=C
+ *   === Summary: P passed, F failed
+ *
+ * The (Nt) suffix after a script name is wall-clock ticks for that
+ * script, computed from sys_times deltas. 1 tick = 10 ms. */
 
 #include "ulib_x64.h"
+
+#define TESTS_MAX      128
+#define NAME_MAX       64
 
 struct readdir_out {
     char name[64];
@@ -24,6 +40,17 @@ static int test_kind(const char *name) {
         name[n-2] == 's' && name[n-1] == 'h') return 1;
     if (n >= 5 && name[n-4] == '.' && name[n-3] == 'l' &&
         name[n-2] == 'u' && name[n-1] == 'a') return 2;
+    return 0;
+}
+
+/* Substring match — returns 1 if `needle` appears in `hay`. */
+static int substr(const char *hay, const char *needle) {
+    if (!needle || !*needle) return 1;
+    for (int i = 0; hay[i]; i++) {
+        int j = 0;
+        while (needle[j] && hay[i+j] == needle[j]) j++;
+        if (!needle[j]) return 1;
+    }
     return 0;
 }
 
@@ -53,29 +80,94 @@ static int run_under(const char *runner, const char *dir, const char *name) {
     return status;
 }
 
+static int u_strcmp2(const char *a, const char *b) {
+    while (*a && *a == *b) { a++; b++; }
+    return (int)(unsigned char)*a - (int)(unsigned char)*b;
+}
+
+/* In-place insertion sort — N <= TESTS_MAX is small so O(N^2) is fine
+ * and we avoid pulling qsort into ulib. */
+static void sort_names(char names[][NAME_MAX], int n) {
+    for (int i = 1; i < n; i++) {
+        char key[NAME_MAX];
+        int k = 0;
+        while (names[i][k] && k < NAME_MAX - 1) { key[k] = names[i][k]; k++; }
+        key[k] = 0;
+        int j = i - 1;
+        while (j >= 0 && u_strcmp2(names[j], key) > 0) {
+            int m = 0;
+            while (names[j][m] && m < NAME_MAX - 1) {
+                names[j+1][m] = names[j][m]; m++;
+            }
+            names[j+1][m] = 0;
+            j--;
+        }
+        int m = 0;
+        while (key[m] && m < NAME_MAX - 1) { names[j+1][m] = key[m]; m++; }
+        names[j+1][m] = 0;
+    }
+}
+
 int main(int argc, char **argv, char **envp) {
     (void)envp;
-    const char *dir = (argc > 1) ? argv[1] : "/tests";
+
+    const char *pattern = 0;
+    const char *dir = "/tests";
+    for (int i = 1; i < argc; i++) {
+        if (u_strcmp(argv[i], "-k") == 0 && i + 1 < argc) {
+            pattern = argv[++i];
+        } else if (u_strcmp(argv[i], "-v") == 0) {
+            /* reserved */
+        } else {
+            dir = argv[i];
+        }
+    }
 
     /* Ensure /scratch exists; tests stash intermediate files there. */
     sys_mkdir("/scratch");
 
-    int passed = 0, failed = 0;
+    /* Collect + filter + sort. readdir order is filesystem-dependent;
+       an alphabetical run makes failures more predictable. */
+    static char names[TESTS_MAX][NAME_MAX];
+    int n = 0;
+
     struct readdir_out e;
     uint32_t idx = 0;
     while (_syscall3(SYS_READDIR, (long)(uintptr_t)dir, idx, (long)(uintptr_t)&e) == 0) {
         idx++;
         int kind = test_kind(e.name);
         if (!kind) continue;
+        if (pattern && !substr(e.name, pattern)) continue;
+        if (n >= TESTS_MAX) break;
+        int k = 0;
+        while (e.name[k] && k < NAME_MAX - 1) { names[n][k] = e.name[k]; k++; }
+        names[n][k] = 0;
+        n++;
+    }
+    sort_names(names, n);
+
+    int passed = 0, failed = 0;
+    for (int i = 0; i < n; i++) {
+        int kind = test_kind(names[i]);
         const char *runner = (kind == 1) ? "/bin/shell" : "/bin/lua";
-        u_puts_n("=== RUN "); u_puts_n(e.name); u_putc('\n');
-        int s = run_under(runner, dir, e.name);
+        u_puts_n("=== RUN  "); u_puts_n(names[i]); u_putc('\n');
+
+        struct tms t0, t1;
+        long r0 = sys_times(&t0);
+        int s = run_under(runner, dir, names[i]);
+        long r1 = sys_times(&t1);
+        long ticks = r1 - r0;
+
         if (s == 0) {
-            u_puts_n("=== OK  "); u_puts_n(e.name); u_putc('\n');
+            u_puts_n("=== OK   ");
+            u_puts_n(names[i]);
+            u_puts_n(" (");   u_putdec(ticks); u_puts_n("t)\n");
             passed++;
         } else {
-            u_puts_n("=== FAIL "); u_puts_n(e.name);
-            u_puts_n(" status="); u_putdec(s); u_putc('\n');
+            u_puts_n("=== FAIL ");
+            u_puts_n(names[i]);
+            u_puts_n(" (");   u_putdec(ticks);
+            u_puts_n("t) status="); u_putdec(s); u_putc('\n');
             failed++;
         }
     }
