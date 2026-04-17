@@ -97,7 +97,7 @@ X64_USER        = hello forktest fstest \
                   echo cat wc head tail grep cp mv touch ls sleep mkdir \
                   mount umount chroot mmaptest env envtest \
                   sigtest alarmtest strace \
-                  dynhello dyn_echo \
+                  dynhello dyn_echo dlopentest \
                   test_pid test_fork test_fs test_stream
 # Simple single-source user targets built via the pattern rule below.
 X64_USER_TARGETS = $(addprefix $(BUILD_USER)/,$(X64_USER))
@@ -152,6 +152,17 @@ build/libvibc/setjmp.o: user/libc/setjmp.s
 build/sysroot/usr/lib/libvibc.a: $(LIBVIBC_OBJS)
 	@mkdir -p $(dir $@)
 	$(AR) rcs $@ $^
+
+# libtestdl.so.1 — a real ET_DYN shared library with two exported
+# functions. dlopentest loads it via its own mini ELF loader.
+build/sysroot/usr/lib/libtestdl.so.1: user/libtestdl/libtestdl.c
+	@mkdir -p $(dir $@)
+	$(CC) $(X64_LIBC_CFLAGS) -fPIC -c $< -o build/libvibc/libtestdl.o
+	$(CC) -nostdlib -ffreestanding \
+	      -Wl,-shared -Wl,-soname,libtestdl.so.1 \
+	      -Wl,-z,max-page-size=0x1000 -Wl,--no-dynamic-linker \
+	      -mno-red-zone -fno-stack-protector \
+	      -o $@ build/libvibc/libtestdl.o -lgcc
 
 # Lua: pull vendored sources from third_party/lua; compile + static
 # link against libvibc + libulib. linit_lighthos + lua_main are the
@@ -414,7 +425,10 @@ docker-test:
 
 TEST_VSH = $(wildcard tests/*.vsh)
 
-build/lighthos-test.iso: $(KERNEL_BIN) grub-test.cfg x64-userland $(X64_USER_EXTRA) $(TEST_VSH)
+build/lighthos-test.iso: $(KERNEL_BIN) grub-test.cfg x64-userland \
+                         $(X64_USER_EXTRA) \
+                         build/sysroot/usr/lib/libtestdl.so.1 \
+                         $(TEST_VSH)
 	@mkdir -p build/iso-test/boot/grub build/iso-test/boot/tests
 	cp $(KERNEL_BIN) build/iso-test/boot/lighthos.bin
 	cp grub-test.cfg build/iso-test/boot/grub/grub.cfg
@@ -422,6 +436,7 @@ build/lighthos-test.iso: $(KERNEL_BIN) grub-test.cfg x64-userland $(X64_USER_EXT
 	    name=$$(basename $$f); \
 	    cp $$f build/iso-test/boot/$$name; \
 	done
+	cp build/sysroot/usr/lib/libtestdl.so.1 build/iso-test/boot/libtestdl.so.1
 	@for f in $(TEST_VSH); do cp $$f build/iso-test/boot/tests/; done
 	grub-mkrescue -o $@ build/iso-test 2>/dev/null
 
@@ -438,8 +453,7 @@ docker-test-iso:
 # alarm, strace, chroot, env, ld.so, lua) are currently expected to
 # fail; they're tracked in PORT_EXPECTED_FAIL so the target exits
 # non-zero only on an unexpected regression.
-PORT_EXPECTED_FAIL = jobs.vsh strace.vsh \
-                     lua_basic.vsh dynhello.vsh dyn_echo.vsh dlopen.vsh
+PORT_EXPECTED_FAIL =
 
 test-disk:
 	@if [ ! -f build/lighthos-test.iso ]; then \
