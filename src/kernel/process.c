@@ -27,6 +27,7 @@
 #include "drivers/serial.h"
 #include "fs/vfs.h"
 #include "kernel/pipe.h"
+#include "kernel/elf.h"
 
 #define USER_STACK_TOP 0x0000000000800000ULL
 #define USER_STACK_PAGES 4
@@ -184,13 +185,16 @@ static int stack_put_u64(uint64_t *pml4, uint64_t va, uint64_t v) {
     return 1;
 }
 
+/* Build the user stack. `auxv_pairs` is an array of (key, value)
+   uint64_t pairs; `auxc` is the number of PAIRS (not u64s). Kernel
+   appends the AT_NULL terminator itself. */
 static uint64_t build_user_stack(uint64_t *pml4, process_t *p,
                                  int argc, const char **argv_src,
-                                 int envc, const char **envp_src) {
+                                 int envc, const char **envp_src,
+                                 const uint64_t *auxv_pairs, int auxc) {
     (void)p;
     uint64_t sp = USER_STACK_TOP;
 
-    /* Push strings first, top-down: envp, then argv. Record VAs. */
     uint64_t env_ptrs[SPAWN_ENVP_MAX];
     uint64_t arg_ptrs[SPAWN_ARGV_MAX];
     for (int i = envc - 1; i >= 0; i--) {
@@ -208,25 +212,28 @@ static uint64_t build_user_stack(uint64_t *pml4, process_t *p,
         arg_ptrs[i] = sp;
     }
 
-    /* Reserve vector slots: argc, argv[0..argc], NULL, envp[0..envc], NULL,
-       auxv NULL pair. Pre-compute total and align so RSP%16==0 at entry. */
     sp &= ~(uint64_t)0xF;
-    int total_slots = 1                 /* argc   */
+    int total_slots = 1                 /* argc */
                     + (argc + 1)        /* argv + NULL */
                     + (envc + 1)        /* envp + NULL */
-                    + 2;                /* auxv AT_NULL */
+                    + (auxc * 2)        /* auxv pairs */
+                    + 2;                /* AT_NULL, 0 */
     uint64_t need = (uint64_t)total_slots * 8;
     uint64_t wp = sp - need;
-    wp &= ~(uint64_t)0xF;               /* entry alignment */
+    wp &= ~(uint64_t)0xF;
     sp = wp;
 
     if (!stack_put_u64(pml4, wp, (uint64_t)argc)) return 0; wp += 8;
     for (int i = 0; i < argc; i++) { if (!stack_put_u64(pml4, wp, arg_ptrs[i])) return 0; wp += 8; }
-    if (!stack_put_u64(pml4, wp, 0)) return 0; wp += 8;       /* argv NULL */
+    if (!stack_put_u64(pml4, wp, 0)) return 0; wp += 8;
     for (int i = 0; i < envc; i++) { if (!stack_put_u64(pml4, wp, env_ptrs[i])) return 0; wp += 8; }
-    if (!stack_put_u64(pml4, wp, 0)) return 0; wp += 8;       /* envp NULL */
-    if (!stack_put_u64(pml4, wp, 0)) return 0; wp += 8;       /* auxv key  */
-    if (!stack_put_u64(pml4, wp, 0)) return 0; wp += 8;       /* auxv val  */
+    if (!stack_put_u64(pml4, wp, 0)) return 0; wp += 8;
+    for (int i = 0; i < auxc; i++) {
+        if (!stack_put_u64(pml4, wp, auxv_pairs[i * 2])) return 0;      wp += 8;
+        if (!stack_put_u64(pml4, wp, auxv_pairs[i * 2 + 1])) return 0;  wp += 8;
+    }
+    if (!stack_put_u64(pml4, wp, 0)) return 0; wp += 8;                  /* AT_NULL */
+    if (!stack_put_u64(pml4, wp, 0)) return 0; wp += 8;                  /* 0 */
 
     return sp;
 }
@@ -260,6 +267,28 @@ int process_spawn_from_memory(const char *name, const void *elf,
     uint64_t entry = elf_load(elf, size, pml4);
     if (!entry) { vmm_free_pml4(pml4); p->alive = false; return -1; }
 
+    /* If the main exec declared PT_INTERP, load the interpreter
+       too and route execution through it. ld-lighthos.so.1 is a
+       static ET_EXEC at a fixed VA (0x40000000), so its e_entry
+       is the final RIP we jump to — the interp walks its own
+       auxv to find main's phdrs and eventually jumps to main's
+       e_entry when relocation is done. */
+    uint64_t main_entry = entry;
+    uint64_t interp_entry = 0;
+    uint64_t interp_base = 0;
+    char interp_path[VFS_MAX_PATH] = {0};
+    if (elf_find_interp(elf, size, interp_path, sizeof(interp_path))) {
+        struct vfs_stat st;
+        if (vfs_stat(interp_path, &st) == 0 && st.size > 0) {
+            void *ibuf = kmalloc(st.size);
+            if (ibuf && vfs_read(interp_path, ibuf, st.size, 0) == (ssize_t)st.size) {
+                interp_entry = elf_load(ibuf, st.size, pml4);
+                interp_base = 0x40000000ULL;
+            }
+            if (ibuf) kfree(ibuf);
+        }
+    }
+
     /* User stack. */
     for (int i = 0; i < USER_STACK_PAGES; i++) {
         uint64_t va = USER_STACK_TOP - (i + 1) * PAGE_SIZE;
@@ -280,8 +309,26 @@ int process_spawn_from_memory(const char *name, const void *elf,
     }
     argv_local[argc] = 0;
 
-    uint64_t rsp = build_user_stack(pml4, p, argc, argv_local, 0, 0);
+    /* Build auxv — ld.so reads these to find main's phdrs + entry. */
+    uint64_t main_phdr_vaddr = elf_phdr_vaddr(elf, size);
+    const elf64_ehdr_t *ehdr = elf;
+    uint64_t auxv[12];
+    int auxc = 0;
+    if (interp_entry) {
+        auxv[auxc*2+0] = 3;  auxv[auxc*2+1] = main_phdr_vaddr;        auxc++;  /* AT_PHDR */
+        auxv[auxc*2+0] = 4;  auxv[auxc*2+1] = ehdr->e_phentsize;      auxc++;  /* AT_PHENT */
+        auxv[auxc*2+0] = 5;  auxv[auxc*2+1] = ehdr->e_phnum;          auxc++;  /* AT_PHNUM */
+        auxv[auxc*2+0] = 7;  auxv[auxc*2+1] = interp_base;            auxc++;  /* AT_BASE */
+        auxv[auxc*2+0] = 9;  auxv[auxc*2+1] = main_entry;             auxc++;  /* AT_ENTRY */
+        auxv[auxc*2+0] = 6;  auxv[auxc*2+1] = PAGE_SIZE;              auxc++;  /* AT_PAGESZ */
+    }
+
+    uint64_t rsp = build_user_stack(pml4, p, argc, argv_local, 0, 0,
+                                    auxv, auxc);
     if (!rsp) { vmm_free_pml4(pml4); p->alive = false; return -1; }
+
+    /* If interp loaded, start there; otherwise main directly. */
+    entry = interp_entry ? interp_entry : main_entry;
 
     task_t *t = task_alloc(name);
     if (!t) { vmm_free_pml4(pml4); p->alive = false; return -1; }
@@ -476,8 +523,22 @@ int process_execve_from_memory(registers_t *regs, const char *name,
     uint64_t *pml4 = p->task->pml4;
     vmm_unmap_user_space(pml4);
 
-    uint64_t entry = elf_load(elf, size, pml4);
-    if (!entry) return -1;
+    uint64_t main_entry = elf_load(elf, size, pml4);
+    if (!main_entry) return -1;
+
+    uint64_t interp_entry = 0, interp_base = 0;
+    char interp_path[VFS_MAX_PATH] = {0};
+    if (elf_find_interp(elf, size, interp_path, sizeof(interp_path))) {
+        struct vfs_stat st;
+        if (vfs_stat(interp_path, &st) == 0 && st.size > 0) {
+            void *ibuf = kmalloc(st.size);
+            if (ibuf && vfs_read(interp_path, ibuf, st.size, 0) == (ssize_t)st.size) {
+                interp_entry = elf_load(ibuf, st.size, pml4);
+                interp_base = 0x40000000ULL;
+            }
+            if (ibuf) kfree(ibuf);
+        }
+    }
 
     for (int i = 0; i < USER_STACK_PAGES; i++) {
         uint64_t va = USER_STACK_TOP - (i + 1) * PAGE_SIZE;
@@ -487,8 +548,22 @@ int process_execve_from_memory(registers_t *regs, const char *name,
         vmm_map_in(pml4, va, frame, VMM_FLAG_WRITE | VMM_FLAG_USER);
     }
 
-    uint64_t rsp = build_user_stack(pml4, p, argc, argv_local, envc, envp_local);
+    uint64_t main_phdr_vaddr = elf_phdr_vaddr(elf, size);
+    const elf64_ehdr_t *ehdr = elf;
+    uint64_t auxv[12]; int auxc = 0;
+    if (interp_entry) {
+        auxv[auxc*2+0] = 3;  auxv[auxc*2+1] = main_phdr_vaddr;  auxc++;
+        auxv[auxc*2+0] = 4;  auxv[auxc*2+1] = ehdr->e_phentsize; auxc++;
+        auxv[auxc*2+0] = 5;  auxv[auxc*2+1] = ehdr->e_phnum;     auxc++;
+        auxv[auxc*2+0] = 7;  auxv[auxc*2+1] = interp_base;       auxc++;
+        auxv[auxc*2+0] = 9;  auxv[auxc*2+1] = main_entry;        auxc++;
+        auxv[auxc*2+0] = 6;  auxv[auxc*2+1] = PAGE_SIZE;         auxc++;
+    }
+
+    uint64_t rsp = build_user_stack(pml4, p, argc, argv_local, envc, envp_local,
+                                    auxv, auxc);
     if (!rsp) return -1;
+    uint64_t entry = interp_entry ? interp_entry : main_entry;
 
     strncpy(p->name, name ? name : "exec", sizeof(p->name) - 1);
 

@@ -97,7 +97,6 @@ X64_USER        = hello forktest fstest \
                   echo cat wc head tail grep cp mv touch ls sleep mkdir \
                   mount umount chroot mmaptest env envtest \
                   sigtest alarmtest strace \
-                  dynhello dyn_echo dlopentest \
                   test_pid test_fork test_fs test_stream
 # Simple single-source user targets built via the pattern rule below.
 X64_USER_TARGETS = $(addprefix $(BUILD_USER)/,$(X64_USER))
@@ -154,7 +153,7 @@ build/sysroot/usr/lib/libvibc.a: $(LIBVIBC_OBJS)
 	$(AR) rcs $@ $^
 
 # libtestdl.so.1 — a real ET_DYN shared library with two exported
-# functions. dlopentest loads it via its own mini ELF loader.
+# functions. Loaded by dlopentest via ld.so's dlopen iface.
 build/sysroot/usr/lib/libtestdl.so.1: user/libtestdl/libtestdl.c
 	@mkdir -p $(dir $@)
 	$(CC) $(X64_LIBC_CFLAGS) -fPIC -c $< -o build/libvibc/libtestdl.o
@@ -163,6 +162,62 @@ build/sysroot/usr/lib/libtestdl.so.1: user/libtestdl/libtestdl.c
 	      -Wl,-z,max-page-size=0x1000 -Wl,--no-dynamic-linker \
 	      -mno-red-zone -fno-stack-protector \
 	      -o $@ build/libvibc/libtestdl.o -lgcc
+
+# libulib.so.1 — ET_DYN version of ulib. PIC build; exports the
+# same API as libulib.a. Used by dynamic binaries via DT_NEEDED.
+build/libulib/ulib.pic.o: user/ulib.c user/ulib.h user/syscall_x64.h
+	@mkdir -p $(dir $@)
+	$(CC) $(X64_LIBC_CFLAGS) -fPIC -fvisibility=default -c $< -o $@
+
+build/sysroot/usr/lib/libulib.so.1: build/libulib/ulib.pic.o
+	@mkdir -p $(dir $@)
+	$(CC) -nostdlib -ffreestanding \
+	      -Wl,-shared -Wl,-soname,libulib.so.1 \
+	      -Wl,-z,max-page-size=0x1000 -Wl,--no-dynamic-linker \
+	      -mno-red-zone -fno-stack-protector \
+	      -o $@ $^ -lgcc
+	@ln -sf libulib.so.1 build/sysroot/usr/lib/libulib.so
+
+# libvibc.so.1 — PIC build of libvibc, depends on libulib.so.1.
+LIBVIBC_PIC_OBJS = $(patsubst user/libc/%.c,build/libvibc/%.pic.o,$(LIBVIBC_SRC)) \
+                   build/libvibc/setjmp.o
+
+build/libvibc/%.pic.o: user/libc/%.c
+	@mkdir -p $(dir $@)
+	$(CC) $(X64_LIBC_CFLAGS) -fPIC -fvisibility=default -c $< -o $@
+
+build/sysroot/usr/lib/libvibc.so.1: $(LIBVIBC_PIC_OBJS) \
+                                    build/sysroot/usr/lib/libulib.so.1
+	@mkdir -p $(dir $@)
+	$(CC) -nostdlib -ffreestanding \
+	      -Wl,-shared -Wl,-soname,libvibc.so.1 \
+	      -Wl,-z,max-page-size=0x1000 -Wl,--no-dynamic-linker \
+	      -mno-red-zone -fno-stack-protector \
+	      -o $@ $(LIBVIBC_PIC_OBJS) \
+	      -Lbuild/sysroot/usr/lib -lulib -lgcc
+	@ln -sf libvibc.so.1 build/sysroot/usr/lib/libvibc.so
+
+# ld-lighthos.so.1 — the user-space runtime linker itself.
+# Built as a static ET_EXEC at 0x40000000; links against libulib.a
+# so it has its own syscall wrappers + strcmp/puts etc.
+build/ldso/crt0_ldso.o: user/ldso/crt0_ldso.s
+	@mkdir -p $(dir $@)
+	nasm -f elf64 $< -o $@
+
+build/ldso/ld_main.o: user/ldso/ld_main.c user/ulib.h user/syscall_x64.h
+	@mkdir -p $(dir $@)
+	$(CC) $(X64_LIBC_CFLAGS) -c $< -o $@
+
+build/sysroot/usr/lib/ld-lighthos.so.1: build/ldso/crt0_ldso.o \
+                                        build/ldso/ld_main.o \
+                                        user/ldso/ldso.ld \
+                                        build/sysroot/usr/lib/libulib.a
+	@mkdir -p $(dir $@)
+	$(CC) -T user/ldso/ldso.ld -nostdlib -ffreestanding -static \
+	      -Wl,--no-dynamic-linker -Wl,--build-id=none \
+	      -mno-red-zone -fno-stack-protector \
+	      -o $@ build/ldso/crt0_ldso.o build/ldso/ld_main.o \
+	      -Wl,-Bstatic -Lbuild/sysroot/usr/lib -l:libulib.a -lgcc
 
 # Lua: pull vendored sources from third_party/lua; compile + static
 # link against libvibc + libulib. linit_lighthos + lua_main are the
@@ -207,8 +262,48 @@ $(X64_USER_TARGETS): $(BUILD_USER)/%: $(BUILD_USER)/crt0.o $(BUILD_USER)/%.o
 	@mkdir -p $(dir $@)
 	x86_64-elf-ld -T user/user.ld -nostdlib -o $@ $^
 
+# Dynamic user binaries: PT_INTERP=/lib/ld-lighthos.so.1 + DT_NEEDED
+# so the runtime linker resolves symbols at load time.
+$(BUILD_USER)/dynhello: $(BUILD_USER)/crt0.o user/dynhello.c \
+                       build/sysroot/usr/lib/libulib.so.1
+	@mkdir -p $(dir $@)
+	$(CC) $(X64_LIBC_CFLAGS) -c user/dynhello.c -o $(BUILD_USER)/dynhello.dyn.o
+	$(CC) -T user/user.ld -nostdlib -ffreestanding \
+	      -Wl,--dynamic-linker=/lib/ld-lighthos.so.1 \
+	      -Wl,--no-as-needed \
+	      -Wl,-rpath-link,build/sysroot/usr/lib \
+	      -mno-red-zone -fno-stack-protector \
+	      -o $@ $(BUILD_USER)/crt0.o $(BUILD_USER)/dynhello.dyn.o \
+	      -Lbuild/sysroot/usr/lib -lulib -lgcc
+
+$(BUILD_USER)/dyn_echo: $(BUILD_USER)/crt0.o user/dyn_echo.c \
+                       build/sysroot/usr/lib/libvibc.so.1 \
+                       build/sysroot/usr/lib/libulib.so.1
+	@mkdir -p $(dir $@)
+	$(CC) $(X64_LIBC_CFLAGS) -c user/dyn_echo.c -o $(BUILD_USER)/dyn_echo.dyn.o
+	$(CC) -T user/user.ld -nostdlib -ffreestanding \
+	      -Wl,--dynamic-linker=/lib/ld-lighthos.so.1 \
+	      -Wl,--no-as-needed \
+	      -Wl,-rpath-link,build/sysroot/usr/lib \
+	      -mno-red-zone -fno-stack-protector \
+	      -o $@ $(BUILD_USER)/crt0.o $(BUILD_USER)/dyn_echo.dyn.o \
+	      -Lbuild/sysroot/usr/lib -lvibc -lulib -lgcc
+
+$(BUILD_USER)/dlopentest: $(BUILD_USER)/crt0.o user/dlopentest.c \
+                         build/sysroot/usr/lib/libulib.so.1
+	@mkdir -p $(dir $@)
+	$(CC) $(X64_LIBC_CFLAGS) -c user/dlopentest.c -o $(BUILD_USER)/dlopentest.dyn.o
+	$(CC) -T user/user.ld -nostdlib -ffreestanding \
+	      -Wl,--dynamic-linker=/lib/ld-lighthos.so.1 \
+	      -Wl,--no-as-needed \
+	      -Wl,-rpath-link,build/sysroot/usr/lib \
+	      -mno-red-zone -fno-stack-protector \
+	      -o $@ $(BUILD_USER)/crt0.o $(BUILD_USER)/dlopentest.dyn.o \
+	      -Lbuild/sysroot/usr/lib -lulib -lgcc
+
 .PHONY: x64-userland
-x64-userland: $(X64_USER_TARGETS) $(BUILD_USER)/lua
+x64-userland: $(X64_USER_TARGETS) $(BUILD_USER)/lua \
+              $(BUILD_USER)/dynhello $(BUILD_USER)/dyn_echo $(BUILD_USER)/dlopentest
 
 .PHONY: all clean iso run run-disk run-vga debug docker-build docker-run test docker-test iso-ready user-programs fix-perms docker-lua-compile bootdisk run-bootdisk docker-bootdisk docker-disk test-iso docker-test-iso test-disk docker-test-disk run-installed
 
@@ -428,15 +523,23 @@ TEST_VSH = $(wildcard tests/*.vsh)
 build/lighthos-test.iso: $(KERNEL_BIN) grub-test.cfg x64-userland \
                          $(X64_USER_EXTRA) \
                          build/sysroot/usr/lib/libtestdl.so.1 \
+                         build/sysroot/usr/lib/libulib.so.1 \
+                         build/sysroot/usr/lib/libvibc.so.1 \
+                         build/sysroot/usr/lib/ld-lighthos.so.1 \
                          $(TEST_VSH)
-	@mkdir -p build/iso-test/boot/grub build/iso-test/boot/tests
+	@mkdir -p build/iso-test/boot/grub build/iso-test/boot/tests build/iso-test/boot/lib
 	cp $(KERNEL_BIN) build/iso-test/boot/lighthos.bin
 	cp grub-test.cfg build/iso-test/boot/grub/grub.cfg
-	@for f in $(X64_USER_TARGETS) $(X64_USER_EXTRA); do \
+	@for f in $(X64_USER_TARGETS) $(X64_USER_EXTRA) \
+	          $(BUILD_USER)/dynhello $(BUILD_USER)/dyn_echo \
+	          $(BUILD_USER)/dlopentest; do \
 	    name=$$(basename $$f); \
 	    cp $$f build/iso-test/boot/$$name; \
 	done
-	cp build/sysroot/usr/lib/libtestdl.so.1 build/iso-test/boot/libtestdl.so.1
+	cp build/sysroot/usr/lib/libtestdl.so.1 build/iso-test/boot/lib/libtestdl.so.1
+	cp build/sysroot/usr/lib/libulib.so.1   build/iso-test/boot/lib/libulib.so.1
+	cp build/sysroot/usr/lib/libvibc.so.1   build/iso-test/boot/lib/libvibc.so.1
+	cp build/sysroot/usr/lib/ld-lighthos.so.1 build/iso-test/boot/lib/ld-lighthos.so.1
 	@for f in $(TEST_VSH); do cp $$f build/iso-test/boot/tests/; done
 	grub-mkrescue -o $@ build/iso-test 2>/dev/null
 

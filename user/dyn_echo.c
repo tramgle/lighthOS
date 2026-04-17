@@ -1,14 +1,21 @@
-/* dyn_echo — like /bin/echo but nominally dynamically linked
- * through libvibc. TEMPORARILY static (see dynhello.c for the
- * ld.so port note). */
-#include "ulib_x64.h"
+/* dyn_echo — joins argv with spaces. Dynamic-linked against
+ * libvibc.so.1 (for snprintf) + libulib.so.1 (transitive).
+ * Exercises recursive DT_NEEDED resolution. */
+#include "ulib.h"
+#include <stdio.h>
 
 int main(int argc, char **argv, char **envp) {
     (void)envp;
+    char buf[256];
+    int pos = 0;
     for (int i = 1; i < argc; i++) {
-        if (i > 1) u_putc(' ');
-        u_puts_n(argv[i]);
+        if (i > 1 && pos < (int)sizeof(buf) - 1) buf[pos++] = ' ';
+        int n = snprintf(buf + pos, sizeof(buf) - pos, "%s", argv[i]);
+        if (n < 0) break;
+        pos += n;
+        if (pos >= (int)sizeof(buf) - 1) break;
     }
-    u_putc('\n');
+    if (pos < (int)sizeof(buf) - 1) buf[pos++] = '\n';
+    sys_write(1, buf, pos);
     return 0;
 }
