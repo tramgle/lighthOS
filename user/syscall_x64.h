@@ -33,11 +33,24 @@
 #define SYS_MMAP_ANON  9
 #define SYS_MOUNT     21
 #define SYS_UMOUNT    22
+#define SYS_ALARM     27
+#define SYS_KILL      37
 #define SYS_PIPE      42
+#define SYS_SIGNAL    48
 #define SYS_DUP2      63
 #define SYS_FORK      57
+#define SYS_SIGRETURN 119
 #define SYS_CHROOT   161
 #define SYS_MPROTECT 125
+
+#define SIG_INT    2
+#define SIG_KILL   9
+#define SIG_ALRM  14
+#define SIG_TERM  15
+#define SIG_CONT  18
+#define SIG_STOP  19
+#define SIG_DFL  ((void *)0)
+#define SIG_IGN  ((void *)1)
 
 #define PROT_READ  0x1
 #define PROT_WRITE 0x2
@@ -149,6 +162,21 @@ static inline long sys_umount(const char *mp) {
 }
 static inline long sys_chroot(const char *path) {
     return _syscall1(SYS_CHROOT, (long)(uintptr_t)path);
+}
+static inline long sys_kill(int pid, int signo) {
+    return _syscall2(SYS_KILL, pid, signo);
+}
+/* Raw sys_signal — kernel takes a handler RIP and just stores it.
+ * Returns previous handler (0 = SIG_DFL, 1 = SIG_IGN). */
+static inline long sys_signal_raw(int signo, void (*handler)(int)) {
+    return _syscall2(SYS_SIGNAL, signo, (long)(uintptr_t)handler);
+}
+static inline long sys_alarm(unsigned secs) {
+    return _syscall1(SYS_ALARM, secs);
+}
+static inline void sys_sigreturn(void) {
+    _syscall0(SYS_SIGRETURN);
+    __builtin_unreachable();
 }
 
 static inline size_t ustrlen(const char *s) {

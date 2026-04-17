@@ -50,9 +50,13 @@ static const char *resolve_path(const char *user_path) {
 #define SYS_MMAP_ANON 9
 #define SYS_MOUNT    21
 #define SYS_UMOUNT   22
+#define SYS_ALARM    27
+#define SYS_KILL     37
 #define SYS_PIPE     42
+#define SYS_SIGNAL   48
 #define SYS_DUP2     63
 #define SYS_FORK     57
+#define SYS_SIGRETURN 119
 #define SYS_CHROOT  161
 #define SYS_MPROTECT 125
 #define SYS_EXECVE  59
@@ -247,6 +251,24 @@ mmap_done:
         regs->rax = 0;
         break;
     }
+
+    case SYS_KILL:
+        regs->rax = (uint64_t)(int64_t)process_kill((uint32_t)a1, (int)a2);
+        break;
+
+    case SYS_SIGNAL:
+        regs->rax = (uint64_t)process_signal((int)a1, a2);
+        break;
+
+    case SYS_SIGRETURN:
+        process_sigreturn(regs);
+        /* regs has been rewritten to the saved user frame — no
+           further dispatch. */
+        return regs;
+
+    case SYS_ALARM:
+        regs->rax = (uint64_t)process_set_alarm((uint32_t)a1);
+        break;
 
     case SYS_PIPE: {
         int pair[2];

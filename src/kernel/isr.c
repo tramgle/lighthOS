@@ -3,6 +3,9 @@
 #include "lib/kprintf.h"
 #include "kernel/panic.h"
 
+void process_deliver_pending_signals(registers_t *regs) __attribute__((weak));
+void process_deliver_pending_signals(registers_t *regs) { (void)regs; }
+
 static isr_handler_t handlers[256];
 
 static const char *exception_names[] = {
@@ -79,6 +82,12 @@ registers_t *isr_handler(registers_t *regs) {
     if (regs->int_no >= 32 && regs->int_no < 48) {
         pic_send_eoi((uint8_t)(regs->int_no - 32));
     }
+
+    /* Deliver any pending user-space signal. Runs for every
+       interrupt return, so a SIGALRM queued by the timer IRQ or
+       a SIGINT queued by SYS_KILL is picked up on the next hop
+       back to ring 3. No-op for kernel-mode frames. */
+    process_deliver_pending_signals(ret);
 
     return ret;
 }

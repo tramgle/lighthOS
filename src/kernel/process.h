@@ -9,6 +9,14 @@
 #define PROCESS_MAX      8
 #define FD_MAX           16
 #define PROCESS_NAME_MAX 32
+#define NSIG             32
+
+#define SIG_INT    2
+#define SIG_KILL   9
+#define SIG_ALRM  14
+#define SIG_TERM  15
+#define SIG_CONT  18
+#define SIG_STOP  19
 
 typedef enum {
     FD_NONE,
@@ -50,6 +58,19 @@ typedef struct process {
        prepends root before handing a path to the VFS. */
     char        root[VFS_MAX_PATH];
     char        cwd[VFS_MAX_PATH];
+    /* Signal state. sig_handlers[0] = SIG_DFL, values 1..NSIG-1
+       store user-space handler address (0 = default, 1 = ignore).
+       sig_pending is a bitmap of queued signals; sig_delivering
+       is set while a handler frame is live on the user stack —
+       SYS_SIGRETURN clears it. sig_saved_regs preserves the
+       interrupted frame for sigreturn. */
+    uint64_t    sig_handlers[NSIG];
+    uint32_t    sig_pending;
+    bool        sig_delivering;
+    registers_t sig_saved_regs;
+    /* alarm_ticks: 100 Hz countdown set by SYS_ALARM. Timer IRQ
+       decrements; reaches 0 queues SIG_ALRM. */
+    uint32_t    alarm_ticks;
     /* Spawn trampoline metadata, populated by process_spawn/execve
        and consumed on first schedule. Per-process so concurrent
        spawns don't race. */
@@ -75,6 +96,14 @@ int     fd_open(const char *path, uint32_t flags);
 int     fd_close(int fd);
 int     fd_dup2(int oldfd, int newfd);
 int     fd_pipe(int fds[2]);
+
+/* Signal plumbing. */
+int64_t process_signal(int signo, uint64_t handler);
+int     process_kill(uint32_t pid, int signo);
+void    process_tick_alarms(void);
+uint32_t process_set_alarm(uint32_t secs);
+void    process_sigreturn(registers_t *regs);
+void    process_deliver_pending_signals(registers_t *regs);
 ssize_t fd_read(int fd, void *buf, size_t n);
 ssize_t fd_write(int fd, const void *buf, size_t n);
 off_t   fd_lseek(int fd, off_t off, int whence);

@@ -673,6 +673,124 @@ off_t fd_lseek(int fd, off_t off, int whence) {
     return (off_t)new_off;
 }
 
+/* --- Signals ------------------------------------------------- */
+
+int64_t process_signal(int signo, uint64_t handler) {
+    if (signo <= 0 || signo >= NSIG) return -1;
+    if (signo == SIG_KILL || signo == SIG_STOP) return -1;
+    process_t *p = process_current();
+    if (!p) return -1;
+    uint64_t prev = p->sig_handlers[signo];
+    p->sig_handlers[signo] = handler;
+    return (int64_t)prev;
+}
+
+int process_kill(uint32_t pid, int signo) {
+    process_t *target = process_get(pid);
+    if (!target) return -1;
+    if (signo <= 0 || signo >= NSIG) return -1;
+    if (signo == SIG_KILL) {
+        target->alive = false;
+        if (target->task) target->task->state = TASK_DEAD;
+        return 0;
+    }
+    target->sig_pending |= (1u << signo);
+    return 0;
+}
+
+uint32_t process_set_alarm(uint32_t secs) {
+    process_t *p = process_current();
+    if (!p) return 0;
+    uint32_t prev = p->alarm_ticks;
+    p->alarm_ticks = secs * 100;
+    return (prev + 99) / 100;
+}
+
+void process_tick_alarms(void) {
+    for (int i = 0; i < PROCESS_MAX; i++) {
+        process_t *p = &processes[i];
+        if (!p->alive) continue;
+        if (p->alarm_ticks > 0) {
+            p->alarm_ticks--;
+            if (p->alarm_ticks == 0) p->sig_pending |= (1u << SIG_ALRM);
+        }
+    }
+}
+
+void process_sigreturn(registers_t *regs) {
+    process_t *p = process_current();
+    if (!p || !p->sig_delivering) return;
+    *regs = p->sig_saved_regs;
+    p->sig_delivering = false;
+}
+
+/* Stack helpers — write a value onto a user stack reachable via
+   the current PML4 (HHDM-backed). */
+static int user_push_u64(uint64_t *rsp, uint64_t val) {
+    uint64_t *pml4 = process_current() ? process_current()->task->pml4 : 0;
+    if (!pml4) return -1;
+    *rsp -= 8;
+    uint64_t page = *rsp & ~(uint64_t)(PAGE_SIZE - 1);
+    uint64_t phys = vmm_get_physical_in(pml4, page);
+    if (!phys) return -1;
+    *(uint64_t *)((uint8_t *)phys_to_virt_low(phys) + (*rsp - page)) = val;
+    return 0;
+}
+
+/* The SIGRETURN trampoline lives in each process's user ABI —
+   when the user-installed handler `ret`s, it pops the return
+   address we pushed onto the stack and jumps there. The address
+   must be a user-space function that invokes SYS_SIGRETURN. We
+   store it per-process in sig_trampoline, set by the user via
+   SYS_SIGNAL when installing the first handler (overwrites are
+   idempotent since every ulib passes the same thunk). */
+void process_deliver_pending_signals(registers_t *regs) {
+    if (!regs) return;
+    if ((regs->cs & 3) != 3) return;          /* not returning to ring 3 */
+    process_t *p = process_current();
+    if (!p) return;
+    if (p->sig_delivering) return;
+    if (p->sig_pending == 0) return;
+
+    /* Pick the lowest-numbered pending signal. */
+    int signo = 0;
+    for (int i = 1; i < NSIG; i++) {
+        if (p->sig_pending & (1u << i)) { signo = i; break; }
+    }
+    if (signo == 0) return;
+    p->sig_pending &= ~(1u << signo);
+
+    uint64_t h = p->sig_handlers[signo];
+    if (h == 0) {
+        /* SIG_DFL — terminate on catchable signals we model. */
+        if (signo == SIG_INT || signo == SIG_ALRM || signo == SIG_TERM) {
+            p->exit_code = 128 + signo;
+            p->alive = false;
+            if (p->task) p->task->state = TASK_DEAD;
+        }
+        return;
+    }
+    if (h == 1) return;                       /* SIG_IGN */
+
+    /* Save the interrupted frame + mark in-delivery. */
+    p->sig_saved_regs = *regs;
+    p->sig_delivering = true;
+
+    /* Push a fake return address — 0 — onto the user stack. The
+       ulib sig thunk never returns here; it calls SYS_SIGRETURN.
+       But `call h` semantics require SOMETHING at [rsp] to keep
+       the stack shape main expects. */
+    uint64_t user_rsp = regs->rsp;
+    if (user_push_u64(&user_rsp, 0) < 0) { p->sig_delivering = false; return; }
+
+    regs->rsp = user_rsp;
+    regs->rip = h;
+    regs->rdi = (uint64_t)signo;
+    /* Maintain 16-byte stack alignment at call boundary: we pushed
+       one 8-byte word, so rsp%16 == 8. Compiler treats handler as
+       a function after a call, so alignment is correct. */
+}
+
 void process_list_all(void) {
     kprintf("PID  PPID  NAME\n");
     for (int i = 0; i < PROCESS_MAX; i++) {
