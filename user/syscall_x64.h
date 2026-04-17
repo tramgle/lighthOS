@@ -63,6 +63,7 @@
 #define SYS_SPAWN  120
 #define SYS_SHUTDOWN 201
 #define SYS_TIME    214
+#define SYS_TIMES    43
 
 #define O_RDONLY 0x00
 #define O_WRONLY 0x01
@@ -128,6 +129,22 @@ static inline long sys_lseek(int fd, long off, int whence) {
     return _syscall3(SYS_LSEEK, fd, off, whence);
 }
 static inline long sys_time(void)                { return _syscall0(SYS_TIME); }
+
+/* Per-process CPU-time snapshot for SYS_TIMES. Units: 100 Hz ticks.
+ * - utime / stime: our own time in user / kernel ring
+ * - cutime / cstime: sum of already-reaped children (populated by
+ *   process_waitpid on reap)
+ * sys_times() returns the current tick count so callers can compute
+ * wall-clock ("real") elapsed time as a delta. */
+struct tms {
+    uint64_t utime;
+    uint64_t stime;
+    uint64_t cutime;
+    uint64_t cstime;
+};
+static inline long sys_times(struct tms *out) {
+    return _syscall1(SYS_TIMES, (long)(uintptr_t)out);
+}
 
 /* strace ring sharable with /bin/strace. */
 struct u_strace_entry {

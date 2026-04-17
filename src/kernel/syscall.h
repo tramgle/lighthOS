@@ -41,6 +41,7 @@
 #define SYS_MOUNT     21
 #define SYS_UMOUNT    22
 #define SYS_ALARM     27
+#define SYS_TIMES     43   /* Linux legacy times(2); writes struct tms, returns ticks. */
 #define SYS_TRACEME     231
 #define SYS_TRACE_READ  232
 #define SYS_MMAP_ANON   9

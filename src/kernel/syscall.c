@@ -601,6 +601,26 @@ mmap_done:
         break;
     }
 
+    case SYS_TIMES: {
+        /* Linux legacy times(2): writes {utime, stime, cutime, cstime}
+           into *out and returns the current tick count. Ticks are 100
+           Hz (1 tick = 10 ms). */
+        struct tms_out {
+            uint64_t utime;
+            uint64_t stime;
+            uint64_t cutime;
+            uint64_t cstime;
+        } *out = (struct tms_out *)(uintptr_t)a1;
+        process_t *p = process_current();
+        if (!p || !out) { regs->rax = (uint64_t)(int64_t)-1; break; }
+        out->utime  = p->utime_ticks;
+        out->stime  = p->stime_ticks;
+        out->cutime = p->cutime_ticks;
+        out->cstime = p->cstime_ticks;
+        regs->rax = timer_get_ticks();
+        break;
+    }
+
     case SYS_MEMINFO: {
         struct meminfo {
             uint64_t total_kb;
