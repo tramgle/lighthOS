@@ -27,6 +27,42 @@ static inline void  kfree_wrap(void *p)      { kfree(p); }
    cwd + chroot root. Returns NULL on overflow. The returned
    pointer is to a static per-call buffer — caller must not hold
    across syscall dispatches. */
+/* --- strace ring. Single target pid. Entry recorded on syscall
+   entry (or on exit-process), with the syscall's return value
+   stamped once the dispatcher fills it in.  trace_target_pid == 0
+   means tracing is off. */
+#define STRACE_RING 256
+struct strace_entry {
+    uint32_t seq;
+    uint32_t pid;
+    uint32_t num;
+    uint32_t exited;         /* 1 for the exited-process marker */
+    uint64_t a1, a2, a3, a4;
+    int64_t  ret;
+};
+static struct strace_entry trace_ring[STRACE_RING];
+static uint32_t trace_next_seq;
+static uint32_t trace_target_pid;
+
+static void trace_record(uint32_t pid, uint32_t num,
+                         uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
+                         int64_t ret, int exited) {
+    if (trace_target_pid == 0 || pid != trace_target_pid) return;
+    struct strace_entry *e = &trace_ring[trace_next_seq % STRACE_RING];
+    e->seq = trace_next_seq;
+    e->pid = pid; e->num = num;
+    e->a1 = a1; e->a2 = a2; e->a3 = a3; e->a4 = a4;
+    e->ret = ret; e->exited = (uint32_t)exited;
+    trace_next_seq++;
+}
+
+void syscall_trace_exited(uint32_t pid, int code) {
+    trace_record(pid, 0, 0, 0, 0, 0, (int64_t)code, 1);
+    /* Disable tracing once target exits so subsequent processes
+       don't pollute the ring. */
+    if (pid == trace_target_pid) trace_target_pid = 0;
+}
+
 static char resolve_buf[VFS_MAX_PATH];
 static const char *resolve_path(const char *user_path) {
     if (!user_path) return 0;
@@ -63,7 +99,9 @@ static const char *resolve_path(const char *user_path) {
 #define SYS_READDIR 89
 #define SYS_SPAWN  120
 #define SYS_SHUTDOWN 201
-#define SYS_TIME    214
+#define SYS_TIME       214
+#define SYS_TRACEME    231
+#define SYS_TRACE_READ 232
 
 static void acpi_shutdown(void) {
     __asm__ volatile ("outw %0, %1" :: "a"((uint16_t)0x2000), "Nd"((uint16_t)0x604));
@@ -82,10 +120,23 @@ static registers_t *syscall_handler(registers_t *regs) {
     uint64_t a1 = regs->rdi;
     uint64_t a2 = regs->rsi;
     uint64_t a3 = regs->rdx;
-    (void)a3;
+    uint64_t a4 = regs->r10;
+    (void)a3; (void)a4;
+
+    /* Entry-point trace hook. Snapshot args before dispatch
+       overwrites regs->rax with the return value. */
+    process_t *__cur = process_current();
+    uint32_t __cur_pid = __cur ? __cur->pid : 0;
+    int __traced = (__cur_pid == trace_target_pid);
+    uint64_t __entry_pos = 0;
+    if (__traced) {
+        __entry_pos = trace_next_seq;
+        trace_record(__cur_pid, (uint32_t)num, a1, a2, a3, a4, 0, 0);
+    }
 
     switch (num) {
     case SYS_EXIT:
+        if (__traced) syscall_trace_exited(__cur_pid, (int)a1);
         process_exit((int)a1);
         regs->rax = 0;
         break;
@@ -353,11 +404,39 @@ mmap_done:
         acpi_shutdown();
         break;
 
+    case SYS_TRACEME:
+        /* Set/clear the global trace target. pid=0 disables. */
+        trace_target_pid = (uint32_t)a1;
+        if (trace_target_pid) trace_next_seq = 0;
+        regs->rax = 0;
+        break;
+
+    case SYS_TRACE_READ: {
+        /* rdi=seq, rsi=*out.  Returns 0 on success, -1 past EOF. */
+        uint32_t seq = (uint32_t)a1;
+        if (seq >= trace_next_seq) { regs->rax = (uint64_t)(int64_t)-1; break; }
+        if (trace_next_seq - seq > STRACE_RING) { regs->rax = (uint64_t)(int64_t)-1; break; }
+        struct strace_entry *src = &trace_ring[seq % STRACE_RING];
+        if (a2) *(struct strace_entry *)(uintptr_t)a2 = *src;
+        regs->rax = 0;
+        break;
+    }
+
     default:
         kprintf("[syscall] unknown %lu from pid %u\n", num,
                 process_current() ? process_current()->pid : 0);
         regs->rax = (uint64_t)(int64_t)-1;
         break;
+    }
+
+    /* Stamp the trace entry's return value now that the dispatcher
+       has filled regs->rax. SYS_SIGRETURN returns early above — we
+       don't record its ret. Same for SYS_EXIT since the process is
+       already dead. */
+    if (__traced && num != SYS_SIGRETURN && num != SYS_EXIT) {
+        if (__entry_pos < trace_next_seq) {
+            trace_ring[__entry_pos % STRACE_RING].ret = (int64_t)regs->rax;
+        }
     }
     return regs;
 }

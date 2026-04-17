@@ -125,6 +125,19 @@ static inline long sys_lseek(int fd, long off, int whence) {
     return _syscall3(SYS_LSEEK, fd, off, whence);
 }
 static inline long sys_time(void)                { return _syscall0(SYS_TIME); }
+
+/* strace ring sharable with /bin/strace. */
+struct u_strace_entry {
+    uint32_t seq, pid, num, exited;
+    long a1, a2, a3, a4;
+    long ret;
+};
+#define SYS_TRACEME    231
+#define SYS_TRACE_READ 232
+static inline long sys_traceme(int pid) { return _syscall1(SYS_TRACEME, pid); }
+static inline long sys_trace_read(unsigned seq, struct u_strace_entry *out) {
+    return _syscall2(SYS_TRACE_READ, seq, (long)(uintptr_t)out);
+}
 static inline long sys_execve(const char *path, char *const argv[], char *const envp[]) {
     return _syscall3(SYS_EXECVE, (long)(uintptr_t)path,
                      (long)(uintptr_t)argv, (long)(uintptr_t)envp);

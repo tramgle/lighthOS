@@ -6,10 +6,11 @@
  *   - Pipes: `a | b | c` — each stage runs in its own fork; stdin of
  *     the next stage is dup2'd from the previous pipe's read end.
  *   - Trailing `> file` or `>> file` redirects the last stage's stdout.
- *   - `exit`, `true`, `false` builtins.
+ *   - Trailing `&` backgrounds the command (pid tracked for jobs/fg).
+ *   - `jobs` and `fg` builtins; `exit`, `true`, `false`.
  *
- * Deferred: input redirect (`<`), quoting escapes (`\"`), background
- * (`&`), env vars, multi-line, globbing.
+ * Deferred: input redirect (`<`), quoting escapes, real `bg`,
+ * env vars, globbing.
  */
 
 #include "ulib_x64.h"
@@ -17,16 +18,57 @@
 #define MAX_ARGS   16
 #define MAX_STAGES 8
 #define LINE_MAX   512
+#define MAX_JOBS   8
 
 struct stage { char *argv[MAX_ARGS]; int argc; };
 
-/* Tokenize `line` in place. Splits on | to fill `stages`. Handles
-   single/double quotes (no escapes inside). `>` / `>>` only makes
-   sense at the end of the last stage — captured into redir_out /
-   redir_path. Returns number of stages. */
+struct job { int pid; int alive; char cmd[64]; };
+static struct job jobs[MAX_JOBS];
+
+static void job_add(int pid, const char *cmd) {
+    for (int i = 0; i < MAX_JOBS; i++) {
+        if (!jobs[i].alive) {
+            jobs[i].pid = pid;
+            jobs[i].alive = 1;
+            int n = 0;
+            while (cmd[n] && n < (int)sizeof(jobs[i].cmd) - 1) {
+                jobs[i].cmd[n] = cmd[n]; n++;
+            }
+            jobs[i].cmd[n] = 0;
+            return;
+        }
+    }
+}
+
+static void jobs_builtin(void) {
+    for (int i = 0; i < MAX_JOBS; i++) {
+        if (jobs[i].alive) {
+            u_puts_n("[");
+            u_putdec(i + 1);
+            u_puts_n("]  Running  ");
+            u_puts_n(jobs[i].cmd);
+            u_putc('\n');
+        }
+    }
+}
+
+static int fg_builtin(void) {
+    /* Wait on the most-recently-added live job. */
+    for (int i = MAX_JOBS - 1; i >= 0; i--) {
+        if (jobs[i].alive) {
+            int st = 0;
+            sys_waitpid(jobs[i].pid, &st);
+            jobs[i].alive = 0;
+            u_puts_n(jobs[i].cmd); u_putc('\n');
+            return st;
+        }
+    }
+    return 0;
+}
+
 static int parse_line(char *line, struct stage *stages, int max_stages,
-                      int *redir_out, char **redir_path) {
-    *redir_out = 0; *redir_path = 0;
+                      int *redir_out, char **redir_path, int *background) {
+    *redir_out = 0; *redir_path = 0; *background = 0;
     int ns = 0;
     stages[0].argc = 0;
     char *p = line;
@@ -43,6 +85,11 @@ static int parse_line(char *line, struct stage *stages, int max_stages,
             stages[ns].argc = 0;
             continue;
         }
+        if (*p == '&') {
+            *background = 1;
+            p++;
+            continue;
+        }
         if (*p == '>') {
             int mode = 1;
             p++;
@@ -55,7 +102,6 @@ static int parse_line(char *line, struct stage *stages, int max_stages,
             *redir_path = start;
             continue;
         }
-        /* Token. Honor leading quote to include spaces. */
         char *tok;
         if (*p == '"' || *p == '\'') {
             char q = *p++;
@@ -65,11 +111,10 @@ static int parse_line(char *line, struct stage *stages, int max_stages,
         } else {
             tok = p;
             while (*p && *p != ' ' && *p != '\t' && *p != '\n' &&
-                   *p != '|' && *p != '>') p++;
-            if (*p == '|' || *p == '>') { /* leave separator for next iter */
-                char save = *p; *p = 0;
-                /* Re-insert so the outer loop sees the separator. */
-                if (save == '|' || save == '>') { /* restore */ *p = save; }
+                   *p != '|' && *p != '>' && *p != '&') p++;
+            if (*p == '|' || *p == '>' || *p == '&') {
+                /* leave separator for next iter; null-terminate in place */
+                char save = *p; *p = 0; *p = save;
             } else if (*p) {
                 *p = 0; p++;
             }
@@ -96,7 +141,8 @@ static void resolve_path(const char *name, char *out, size_t cap) {
 }
 
 static int run_pipeline(struct stage *stages, int nstages,
-                        int redir_out, const char *redir_path) {
+                        int redir_out, const char *redir_path,
+                        int background, const char *raw_line) {
     int prev_read = -1;
     int pids[MAX_STAGES];
     int npids = 0;
@@ -133,18 +179,17 @@ static int run_pipeline(struct stage *stages, int nstages,
             sys_exit(127);
         }
         if (pid < 0) return 1;
-
-        /* Parent: close fds we don't need; keep read-end for next stage. */
         if (prev_read >= 0) sys_close(prev_read);
-        if (!is_last) {
-            sys_close(pfds[1]);
-            prev_read = pfds[0];
-        } else {
-            prev_read = -1;
-        }
+        if (!is_last) { sys_close(pfds[1]); prev_read = pfds[0]; }
+        else          prev_read = -1;
         pids[npids++] = (int)pid;
     }
 
+    if (background) {
+        /* Don't waitpid; register last stage as a job. */
+        job_add(pids[npids - 1], raw_line);
+        return 0;
+    }
     int last_status = 0;
     for (int i = 0; i < npids; i++) {
         int st = 0;
@@ -155,13 +200,25 @@ static int run_pipeline(struct stage *stages, int nstages,
 }
 
 static int run_line(char *line) {
+    /* Save a copy of the raw line for job tracking before the
+       parser rewrites in place. */
+    char saved[LINE_MAX];
+    int si = 0;
+    for (; line[si] && si < LINE_MAX - 1; si++) saved[si] = line[si];
+    saved[si] = 0;
+    /* Trim trailing newline. */
+    while (si > 0 && (saved[si-1] == '\n' || saved[si-1] == '\r' ||
+                      saved[si-1] == ' '  || saved[si-1] == '\t')) {
+        saved[--si] = 0;
+    }
+
     struct stage stages[MAX_STAGES];
     int redir_out = 0; char *redir_path = 0;
-    int ns = parse_line(line, stages, MAX_STAGES, &redir_out, &redir_path);
+    int background = 0;
+    int ns = parse_line(line, stages, MAX_STAGES, &redir_out, &redir_path, &background);
     if (ns <= 0) return 0;
     if (ns == 1 && stages[0].argc == 0) return 0;
 
-    /* Builtins — only meaningful in single-stage invocation. */
     if (ns == 1) {
         const char *cmd = stages[0].argv[0];
         if (u_strcmp(cmd, "exit") == 0) {
@@ -169,8 +226,50 @@ static int run_line(char *line) {
         }
         if (u_strcmp(cmd, "true") == 0)  return 0;
         if (u_strcmp(cmd, "false") == 0) return 1;
+        if (u_strcmp(cmd, "jobs") == 0) {
+            /* `jobs` with redirect: fork so we can redirect stdout. */
+            if (redir_out) {
+                long pid = sys_fork();
+                if (pid == 0) {
+                    long flags = O_WRONLY | O_CREAT;
+                    flags |= (redir_out == 1) ? O_TRUNC : O_APPEND;
+                    int ofd = sys_open(redir_path, flags);
+                    if (ofd < 0) sys_exit(125);
+                    sys_dup2(ofd, 1);
+                    if (ofd != 1) sys_close(ofd);
+                    jobs_builtin();
+                    sys_exit(0);
+                }
+                int st = 0; sys_waitpid((int)pid, &st);
+                return st;
+            }
+            jobs_builtin();
+            return 0;
+        }
+        if (u_strcmp(cmd, "fg") == 0) {
+            /* fg's waitpid + jobs[].alive clear MUST happen in the
+               shell process itself so subsequent `jobs` sees the
+               reaped state. Only the output is redirected. */
+            int saved_stdout = -1;
+            if (redir_out) {
+                long flags = O_WRONLY | O_CREAT;
+                flags |= (redir_out == 1) ? O_TRUNC : O_APPEND;
+                int ofd = sys_open(redir_path, flags);
+                if (ofd < 0) return 1;
+                saved_stdout = 9;              /* unused high fd */
+                sys_dup2(1, saved_stdout);
+                sys_dup2(ofd, 1);
+                if (ofd != 1) sys_close(ofd);
+            }
+            int rc = fg_builtin();
+            if (saved_stdout != -1) {
+                sys_dup2(saved_stdout, 1);
+                sys_close(saved_stdout);
+            }
+            return rc;
+        }
     }
-    return run_pipeline(stages, ns, redir_out, redir_path);
+    return run_pipeline(stages, ns, redir_out, redir_path, background, saved);
 }
 
 static int run_script(const char *path) {

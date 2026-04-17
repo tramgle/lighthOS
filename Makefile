@@ -96,7 +96,7 @@ X64_USER        = hello forktest fstest \
                   runtests shell assert \
                   echo cat wc head tail grep cp mv touch ls sleep mkdir \
                   mount umount chroot mmaptest env envtest \
-                  sigtest alarmtest \
+                  sigtest alarmtest strace \
                   test_pid test_fork test_fs test_stream
 X64_USER_TARGETS = $(addprefix $(BUILD_USER)/,$(X64_USER))
 
@@ -358,7 +358,7 @@ docker-test-iso:
 # alarm, strace, chroot, env, ld.so, lua) are currently expected to
 # fail; they're tracked in PORT_EXPECTED_FAIL so the target exits
 # non-zero only on an unexpected regression.
-PORT_EXPECTED_FAIL = signal.vsh jobs.vsh alarm.vsh strace.vsh \
+PORT_EXPECTED_FAIL = jobs.vsh strace.vsh \
                      lua_basic.vsh dynhello.vsh dyn_echo.vsh dlopen.vsh
 
 test-disk:
