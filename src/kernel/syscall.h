@@ -54,6 +54,31 @@
 
 #define SYSCALL_MAX 256
 
+/* SYS_PAGEMAP output. For a given user VA, reports each level's
+   index + the raw PTE-ish entry at that level + the final physical
+   address (or 0 if not mapped). On x86_64 we have 4 levels, so
+   pml4/pdpt/pd/pt all appear. */
+struct pagemap_out {
+    uint32_t pml4_idx;
+    uint32_t pdpt_idx;
+    uint32_t pd_idx;
+    uint32_t pt_idx;
+    uint64_t pml4e;
+    uint64_t pdpte;
+    uint64_t pde;
+    uint64_t pte;
+    uint64_t phys;
+};
+
+/* SYS_REGIONS output. One physical region from the PMM's ranged view.
+   Caller invokes with idx=0, 1, 2, ... until syscall returns -1. */
+struct region_out {
+    uint64_t start_addr;
+    uint64_t end_addr;
+    uint32_t used;
+    uint32_t _pad;
+};
+
 void syscall_init(void);
 
 #endif

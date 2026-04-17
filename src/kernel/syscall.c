@@ -45,6 +45,26 @@ static struct strace_entry trace_ring[STRACE_RING];
 static uint32_t trace_next_seq;
 static uint32_t trace_target_pid;
 
+/* SYS_REGIONS: pmm_region_iter takes a callback with no context
+   pointer, so the dispatch stashes its state here for the duration
+   of the call. Serial syscall dispatch makes this safe. */
+uint64_t regions_target;
+uint64_t regions_seen;
+struct region_out regions_result;
+int regions_found;
+
+void regions_collect_cb(uint32_t start_frame, uint32_t len, bool used) {
+    if (regions_found) return;
+    if (regions_seen == regions_target) {
+        regions_result.start_addr = (uint64_t)start_frame * PAGE_SIZE;
+        regions_result.end_addr   = (uint64_t)(start_frame + len) * PAGE_SIZE;
+        regions_result.used       = used ? 1 : 0;
+        regions_result._pad       = 0;
+        regions_found = 1;
+    }
+    regions_seen++;
+}
+
 static void trace_record(uint32_t pid, uint32_t num,
                          uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4,
                          int64_t ret, int exited) {
@@ -490,6 +510,82 @@ mmap_done:
         out->total_kb = (uint64_t)pmm_get_total_count() * 4u;   /* 4 KiB */
         out->free_kb  = (uint64_t)pmm_get_free_count()  * 4u;
         regs->rax = 0;
+        break;
+    }
+
+    case SYS_PEEK: {
+        /* Read `count` bytes of physical memory starting at `src` into
+           the user's `dst` buffer. Source must lie within the first
+           64 MiB (the HHDM window). Caps at 4 KiB per call to keep
+           the kernel from being used as a giant memcpy engine. */
+        uint64_t src   = a1;
+        uint64_t dst   = a2;
+        uint64_t count = a3;
+        const uint64_t HHDM_LIMIT = 0x4000000ULL;   /* 64 MiB */
+        const uint64_t PEEK_MAX   = 4096;
+        if (count == 0) { regs->rax = 0; break; }
+        if (count > PEEK_MAX || src + count < src ||
+            src + count > HHDM_LIMIT) {
+            regs->rax = (uint64_t)(int64_t)-1; break;
+        }
+        const uint8_t *k = (const uint8_t *)(KERNEL_HHDM_BASE + src);
+        uint8_t *u = (uint8_t *)(uintptr_t)dst;
+        for (uint64_t i = 0; i < count; i++) u[i] = k[i];
+        regs->rax = count;
+        break;
+    }
+
+    case SYS_PAGEMAP: {
+        /* Walk the current PML4 for user VA `a1` and fill *a2. */
+        struct pagemap_out *out = (struct pagemap_out *)(uintptr_t)a2;
+        if (!out) { regs->rax = (uint64_t)(int64_t)-1; break; }
+        uint64_t va = a1;
+        uint64_t *pml4 = task_current_pml4();
+        if (!pml4) { regs->rax = (uint64_t)(int64_t)-1; break; }
+
+        uint32_t i_pml4 = (uint32_t)((va >> 39) & 0x1FF);
+        uint32_t i_pdpt = (uint32_t)((va >> 30) & 0x1FF);
+        uint32_t i_pd   = (uint32_t)((va >> 21) & 0x1FF);
+        uint32_t i_pt   = (uint32_t)((va >> 12) & 0x1FF);
+
+        out->pml4_idx = i_pml4; out->pdpt_idx = i_pdpt;
+        out->pd_idx   = i_pd;   out->pt_idx   = i_pt;
+        out->pml4e = out->pdpte = out->pde = out->pte = out->phys = 0;
+
+        out->pml4e = pml4[i_pml4];
+        if (!(out->pml4e & VMM_FLAG_PRESENT)) { regs->rax = 0; break; }
+        uint64_t *pdpt = (uint64_t *)(uintptr_t)
+            (KERNEL_HHDM_BASE + (out->pml4e & 0x000FFFFFFFFFF000ULL));
+        out->pdpte = pdpt[i_pdpt];
+        if (!(out->pdpte & VMM_FLAG_PRESENT)) { regs->rax = 0; break; }
+        uint64_t *pd = (uint64_t *)(uintptr_t)
+            (KERNEL_HHDM_BASE + (out->pdpte & 0x000FFFFFFFFFF000ULL));
+        out->pde = pd[i_pd];
+        if (!(out->pde & VMM_FLAG_PRESENT)) { regs->rax = 0; break; }
+        uint64_t *pt = (uint64_t *)(uintptr_t)
+            (KERNEL_HHDM_BASE + (out->pde & 0x000FFFFFFFFFF000ULL));
+        out->pte = pt[i_pt];
+        if (out->pte & VMM_FLAG_PRESENT) {
+            out->phys = (out->pte & 0x000FFFFFFFFFF000ULL) | (va & 0xFFF);
+        }
+        regs->rax = 0;
+        break;
+    }
+
+    case SYS_REGIONS: {
+        /* Return the nth region reported by pmm_region_iter. */
+        struct region_out *out = (struct region_out *)(uintptr_t)a2;
+        if (!out) { regs->rax = (uint64_t)(int64_t)-1; break; }
+        regions_target = a1;
+        regions_seen   = 0;
+        regions_found  = 0;
+        pmm_region_iter(regions_collect_cb);
+        if (regions_found) {
+            *out = regions_result;
+            regs->rax = 0;
+        } else {
+            regs->rax = (uint64_t)(int64_t)-1;
+        }
         break;
     }
 

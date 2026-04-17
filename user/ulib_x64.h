@@ -41,6 +41,18 @@ static inline void u_putdec(long v) {
     while (v > 0) { b[i++] = '0' + (v % 10); v /= 10; }
     while (i > 0) u_putc(b[--i]);
 }
+/* Print an unsigned 64-bit value in lowercase hex, no "0x" prefix,
+   no zero-padding. Callers add both if they want them. */
+static inline void u_puthex(uint64_t v) {
+    char b[16]; int i = 0;
+    if (v == 0) { u_putc('0'); return; }
+    while (v > 0) {
+        unsigned d = (unsigned)(v & 0xF);
+        b[i++] = d < 10 ? ('0' + d) : ('a' + d - 10);
+        v >>= 4;
+    }
+    while (i > 0) u_putc(b[--i]);
+}
 /* Read a full file into `buf`. Returns bytes read or -1. */
 static inline long u_slurp(const char *path, char *buf, size_t cap) {
     int fd = sys_open(path, O_RDONLY);

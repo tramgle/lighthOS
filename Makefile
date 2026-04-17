@@ -50,6 +50,7 @@ X64_USER        = hello forktest fstest \
                   echo cat wc head tail grep cp mv touch ls sleep mkdir \
                   mount umount chroot mmaptest env envtest \
                   sigtest alarmtest strace \
+                  hexdump pagemap regions \
                   test_pid test_fork test_fs test_stream test_pgroup test_xmm
 # Binaries that need libvibc (stdio.h, printf, string.h) get their
 # own linker rules below — not added to X64_USER so the generic

@@ -206,6 +206,9 @@ static inline long sys_getpgid(int pid) {
 
 #define SYS_PS       200
 #define SYS_MEMINFO  210
+#define SYS_REGIONS  211
+#define SYS_PAGEMAP  212
+#define SYS_PEEK     213
 #define SYS_BLKDEVS  215
 #define SYS_CHDIR     12
 #define SYS_GETCWD   183
@@ -240,6 +243,25 @@ struct meminfo {
     uint64_t free_kb;
 };
 
+struct pagemap_out {
+    uint32_t pml4_idx;
+    uint32_t pdpt_idx;
+    uint32_t pd_idx;
+    uint32_t pt_idx;
+    uint64_t pml4e;
+    uint64_t pdpte;
+    uint64_t pde;
+    uint64_t pte;
+    uint64_t phys;
+};
+
+struct region_out {
+    uint64_t start_addr;
+    uint64_t end_addr;
+    uint32_t used;
+    uint32_t _pad;
+};
+
 static inline long sys_ps(uint32_t idx, struct proc_info *out) {
     return _syscall2(SYS_PS, (long)idx, (long)(uintptr_t)out);
 }
@@ -248,6 +270,15 @@ static inline long sys_blkdevs(uint32_t idx, struct blkdev_info *out) {
 }
 static inline long sys_meminfo(struct meminfo *out) {
     return _syscall1(SYS_MEMINFO, (long)(uintptr_t)out);
+}
+static inline long sys_peek(uint64_t src, void *dst, uint64_t count) {
+    return _syscall3(SYS_PEEK, (long)src, (long)(uintptr_t)dst, (long)count);
+}
+static inline long sys_pagemap(uint64_t va, struct pagemap_out *out) {
+    return _syscall2(SYS_PAGEMAP, (long)va, (long)(uintptr_t)out);
+}
+static inline long sys_regions(uint32_t idx, struct region_out *out) {
+    return _syscall2(SYS_REGIONS, (long)idx, (long)(uintptr_t)out);
 }
 
 static inline size_t ustrlen(const char *s) {
