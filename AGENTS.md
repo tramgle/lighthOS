@@ -211,11 +211,45 @@ Dynamic set: `dynhello`, `dyn_echo`, `dlopentest`. Proof the
 ld.so path still works end-to-end (covered by `dynhello.vsh`,
 `dyn_echo.vsh`, `ldso_smoke.vsh`, `dlopen.vsh`).
 
+## Audit of `main` vs `x64-port` (done 2026-04-17)
+
+File-level diff audit complete. Findings:
+
+- **Real regressions restored on the port branch**:
+  - `user/grep.c` — multi-file support + `<path>:` label prefix were
+    lost; now restored. `grep -n foo a b` labels each hit.
+  - `user/wc.c` — multi-file support + per-file label + trailing
+    `total` line were lost; restored.
+  - `src/kernel/process.h` — `SIG_HUP` (number 1) was dropped.
+    Re-added alongside the other signal constants. No code delivers
+    it yet; it exists purely for ABI continuity so `kill -HUP` and
+    any future user handler are wired to the same number as before.
+- **Intentional changes, not regressions** (documented here so the
+  next audit doesn't re-flag them):
+  - `SYS_SBRK` (syscall 45) no longer exists in the kernel. The
+    userspace `sys_sbrk` shim in `user/ulib.c` now grows an
+    `mmap_anon` arena in 64 KiB chunks. libvibc's malloc keeps
+    calling `sys_sbrk` unchanged.
+  - `user/shell.c` no longer has a `write <path> <text...>`
+    builtin. The shell's `>` / `>>` redirection covers the same
+    ground (`echo foo > path`).
+  - Pre-port binaries `hexdump`, `pagemap`, `regions`,
+    `test_badptr` remain unbuilt. They depend on the three
+    unimplemented debug syscalls called out under Deferred.
+  - Pre-port kernel files `src/drivers/ramdisk.{c,h}`,
+    `src/fs/simplefs.{c,h}`, `src/kernel/gdbstub.{c,h}` were
+    deleted. Ramdisk + simplefs are superseded by ATA+FAT32+VFS.
+    gdbstub was i386-only; QEMU's `-s -S` replaces it.
+  - Pre-port `user/fork_test.c` deleted — it used the old `syscall.h`
+    and duplicated functionality in the live `user/test_fork.c`.
+  - Test suite grew from **18** `.vsh` scripts on `main` to **20**
+    on `x64-port` (`pgroup.vsh`, `xmm.vsh` added). All 18 pre-port
+    scripts carried forward verbatim.
+
 ## Plan for next session
 
-**Do a branch-diff audit.** `x64-port` has ~22 commits beyond
-`main`. A full file-level comparison hasn't been done; the user
-has asked for one. Concrete steps:
+Audit has been done (see section above). Concrete steps retained
+for reference if re-running:
 
 1. `git diff main..x64-port --stat` — top-level scan.
 2. `git diff main..x64-port -- user/ src/kernel/syscall.{c,h}
@@ -229,7 +263,7 @@ has asked for one. Concrete steps:
    - Pre-port `X64_USER` list vs current
      `X64_USER + X64_USER_EXTRA + X64_USER_LIBC`.
    - Every `tests/*.vsh` that existed on `main` vs current
-     (currently 20 → was 16 pre-port, all carried + 4 new).
+     (currently 20 → was 18 pre-port, all carried + 2 new).
 
 Commits worth auditing individually:
 

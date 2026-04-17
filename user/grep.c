@@ -1,4 +1,6 @@
-/* grep [-v] [-i] [-n] <pattern> [file] — literal substring match. */
+/* grep [-v] [-i] [-n] <pattern> [file...] — literal substring match.
+   When more than one file is given, matching lines are prefixed with
+   "<path>:" so output from multiple files can be told apart. */
 #include "ulib_x64.h"
 
 static char lowc(char c) { return (c >= 'A' && c <= 'Z') ? (char)(c - 'A' + 'a') : c; }
@@ -38,27 +40,42 @@ int main(int argc, char **argv, char **envp) {
     }
     if (arg >= argc) return 2;
     const char *pat = argv[arg++];
-    int fd = (arg < argc) ? sys_open(argv[arg], O_RDONLY) : 0;
-    if (fd < 0) return 1;
+    int file_count = argc - arg;
+    int multi = (file_count > 1);
 
-    char line[1024];
-    int lineno = 0;
-    for (;;) {
-        long n = u_readline(fd, line, sizeof(line));
-        if (n <= 0) break;
-        lineno++;
-        /* strip trailing \n for match check (matches shouldn't care) */
-        char saved = 0;
-        if (line[n-1] == '\n') { saved = '\n'; line[n-1] = 0; n--; }
-        int hit = contains(line, pat, icase);
-        if (inv) hit = !hit;
-        if (hit) {
-            if (numbered) { u_putdec(lineno); u_putc(':'); }
-            sys_write(1, line, n);
-            if (saved) u_putc('\n');
+    int round = 0;
+    do {
+        int fd;
+        const char *label = 0;
+        if (file_count == 0) {
+            fd = 0;
+        } else {
+            label = argv[arg + round];
+            fd = sys_open(label, O_RDONLY);
+            if (fd < 0) { round++; continue; }
         }
-        if (saved) { line[n] = '\n'; }
-    }
-    if (fd > 0) sys_close(fd);
+
+        char line[1024];
+        int lineno = 0;
+        for (;;) {
+            long n = u_readline(fd, line, sizeof(line));
+            if (n <= 0) break;
+            lineno++;
+            char saved = 0;
+            if (line[n-1] == '\n') { saved = '\n'; line[n-1] = 0; n--; }
+            int hit = contains(line, pat, icase);
+            if (inv) hit = !hit;
+            if (hit) {
+                if (multi && label) { u_puts_n(label); u_putc(':'); }
+                if (numbered) { u_putdec(lineno); u_putc(':'); }
+                sys_write(1, line, n);
+                if (saved) u_putc('\n');
+            }
+            if (saved) { line[n] = '\n'; }
+        }
+        if (fd > 0) sys_close(fd);
+        round++;
+    } while (round < file_count);
+
     return 0;
 }

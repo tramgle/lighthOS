@@ -1,16 +1,14 @@
-/* wc [-l|-w|-c] [file] — count lines / words / bytes.
- * Default: all three, line count only in our minimal build's single
- * argument form so the test harness can do `wc -w` / `wc -l` / `wc -c`. */
+/* wc [-l|-w|-c] [file...] — count lines / words / bytes.
+ * Default (no flag): print all three. With multiple files, prints
+ * one summary line per file plus a trailing "total" line. */
 #include "ulib_x64.h"
 
-static int count_fd(int fd, int mode, long *lines, long *words, long *bytes) {
-    (void)mode;
+static void count_fd(int fd, long *lines, long *words, long *bytes) {
     char buf[4096];
     int in_word = 0;
     for (;;) {
         long n = sys_read(fd, buf, sizeof(buf));
-        if (n < 0) return 1;
-        if (n == 0) break;
+        if (n <= 0) break;
         *bytes += n;
         for (long i = 0; i < n; i++) {
             char c = buf[i];
@@ -19,7 +17,17 @@ static int count_fd(int fd, int mode, long *lines, long *words, long *bytes) {
             else if (!in_word)                      { in_word = 1; (*words)++; }
         }
     }
-    return 0;
+}
+
+static void print_counts(long lines, long words, long bytes,
+                         int show_l, int show_w, int show_c,
+                         const char *label) {
+    int printed = 0;
+    if (show_l) { if (printed++) u_putc(' '); u_putdec(lines); }
+    if (show_w) { if (printed++) u_putc(' '); u_putdec(words); }
+    if (show_c) { if (printed++) u_putc(' '); u_putdec(bytes); }
+    if (label)  { u_putc(' '); u_puts_n(label); } else u_putc('\n');
+    if (label)  u_putc('\n');
 }
 
 int main(int argc, char **argv, char **envp) {
@@ -40,16 +48,29 @@ int main(int argc, char **argv, char **envp) {
     }
     if (!show_l && !show_w && !show_c) { show_l = show_w = show_c = 1; }
 
-    long lines = 0, words = 0, bytes = 0;
-    int fd = (arg < argc) ? sys_open(argv[arg], O_RDONLY) : 0;
-    if (fd < 0) return 1;
-    count_fd(fd, 0, &lines, &words, &bytes);
-    if (fd > 0) sys_close(fd);
+    int file_count = argc - arg;
+    long tl = 0, tw = 0, tb = 0;
 
-    int printed = 0;
-    if (show_l) { if (printed++) u_putc(' '); u_putdec(lines); }
-    if (show_w) { if (printed++) u_putc(' '); u_putdec(words); }
-    if (show_c) { if (printed++) u_putc(' '); u_putdec(bytes); }
-    u_putc('\n');
+    if (file_count == 0) {
+        long lines = 0, words = 0, bytes = 0;
+        count_fd(0, &lines, &words, &bytes);
+        print_counts(lines, words, bytes, show_l, show_w, show_c, 0);
+        return 0;
+    }
+
+    for (int i = 0; i < file_count; i++) {
+        const char *path = argv[arg + i];
+        int fd = sys_open(path, O_RDONLY);
+        if (fd < 0) continue;
+        long lines = 0, words = 0, bytes = 0;
+        count_fd(fd, &lines, &words, &bytes);
+        sys_close(fd);
+        print_counts(lines, words, bytes, show_l, show_w, show_c,
+                     file_count > 1 ? path : 0);
+        if (file_count == 1) {} /* single-file: no label, newline in print_counts */
+        tl += lines; tw += words; tb += bytes;
+    }
+    if (file_count > 1)
+        print_counts(tl, tw, tb, show_l, show_w, show_c, "total");
     return 0;
 }

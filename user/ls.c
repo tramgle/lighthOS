@@ -11,10 +11,6 @@ struct readdir_out {
     uint32_t type;
 };
 
-static size_t my_strlen(const char *s) {
-    size_t n = 0; while (s[n]) n++; return n;
-}
-
 static void print_uint(uint32_t v) { u_putdec((long)v); }
 static void print_padded_uint(uint32_t v, int width) {
     char buf[16]; int n = 0;
@@ -118,6 +114,5 @@ int main(int argc, char **argv, char **envp) {
         if (i + 1 < path_count) u_putc('\n');
     }
     (void)print_uint;
-    (void)my_strlen;
     return rc;
 }

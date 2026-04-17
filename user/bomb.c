@@ -7,16 +7,10 @@
    Useful as a stress test: `bomb 5` -> 32 processes, `bomb 10` -> 1024,
    `bomb` -> as many as the kernel will grant. */
 
-static int parse_int(const char *s) {
-    int v = 0;
-    while (*s >= '0' && *s <= '9') { v = v * 10 + (*s - '0'); s++; }
-    return v;
-}
-
 int main(int argc, char **argv, char **envp) {
     (void)envp;
     int max_gen = -1;  /* -1 = unbounded */
-    if (argc > 1 && argv[1]) max_gen = parse_int(argv[1]);
+    if (argc > 1 && argv[1]) max_gen = u_atoi(argv[1]);
 
     long pid = sys_getpid();
     u_puts_n("[bomb] pid="); u_putdec(pid);

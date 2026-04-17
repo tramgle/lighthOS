@@ -11,6 +11,7 @@
 #define PROCESS_NAME_MAX 32
 #define NSIG             32
 
+#define SIG_HUP    1
 #define SIG_INT    2
 #define SIG_KILL   9
 #define SIG_ALRM  14
