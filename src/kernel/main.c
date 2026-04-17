@@ -212,6 +212,14 @@ void kernel_main(uint32_t magic, multiboot_info_t *mbi) {
     if (pid < 0) { kprintf("spawn failed; no init found\n"); goto halt; }
     kprintf("[main] spawned pid %d\n", pid);
 
+    /* Dump everything kprintf'd since boot to /boot.log so the user
+       has a record of driver init + mounts after init takes over the
+       console. kprintf keeps buffering after this point, so later
+       output still ends up in the ring — manual flushers can read
+       the file, truncate, and write again if we ever want a running
+       log. */
+    boot_log_flush("/boot.log");
+
     task_enable_scheduling();
     __asm__ volatile ("sti");
 

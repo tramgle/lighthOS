@@ -434,6 +434,28 @@ void process_exit(int code) {
         }
         p->exit_code = code;
         p->alive = false;
+
+        /* Auto-reap any already-dead children we're leaving behind —
+           nobody else will waitpid for them, and leaving zombies
+           unreaped burns PROCESS_MAX slots forever. bomb 3 hits this
+           in 8 forks. Live children keep their parent_pid so that
+           when they eventually exit, the parent-alive check below
+           sees us (dead) and self-reaps them. */
+        for (int i = 0; i < PROCESS_MAX; i++) {
+            process_t *c = &processes[i];
+            if (c->parent_pid != p->pid) continue;
+            if (!c->alive && !c->reaped) c->reaped = true;
+        }
+
+        /* If our own parent has already exited, nobody will waitpid
+           for us either — self-reap so our slot frees up. */
+        process_t *par = 0;
+        for (int i = 0; i < PROCESS_MAX; i++) {
+            if (processes[i].pid == p->parent_pid && processes[i].alive) {
+                par = &processes[i]; break;
+            }
+        }
+        if (!par) p->reaped = true;
     }
     if (p && p->task) p->task->state = TASK_DEAD;
     task_yield();
