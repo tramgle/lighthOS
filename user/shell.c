@@ -286,13 +286,231 @@ static int run_script(const char *path) {
     return any_fail;
 }
 
+/* ---- Line editor with history + tab completion ------------------ */
+
+/* Keystroke bytes emitted by the kernel's serial CSI decoder.
+   Must match src/drivers/keyboard.h. */
+#define K_UP     0x81
+#define K_DOWN   0x82
+#define K_LEFT   0x83
+#define K_RIGHT  0x84
+#define K_HOME   0x85
+#define K_END    0x86
+#define K_DEL    0x95
+
+#define HIST_MAX 32
+static char hist[HIST_MAX][LINE_MAX];
+static int  hist_count;          /* number of valid entries (0..HIST_MAX) */
+static int  hist_head;           /* next write slot */
+
+static void hist_push(const char *line) {
+    /* Skip empty + duplicate-of-last. */
+    if (!line[0]) return;
+    int last = (hist_head - 1 + HIST_MAX) % HIST_MAX;
+    if (hist_count > 0 && u_strcmp(hist[last], line) == 0) return;
+    int i = 0;
+    while (line[i] && i < LINE_MAX - 1) { hist[hist_head][i] = line[i]; i++; }
+    hist[hist_head][i] = 0;
+    hist_head = (hist_head + 1) % HIST_MAX;
+    if (hist_count < HIST_MAX) hist_count++;
+}
+
+/* Return the i'th most recent entry (i=0 = most recent); 0 if out of range. */
+static const char *hist_get(int i) {
+    if (i < 0 || i >= hist_count) return 0;
+    int slot = (hist_head - 1 - i + HIST_MAX * 2) % HIST_MAX;
+    return hist[slot];
+}
+
+/* Repaint the editable portion of the input line. Assumes the
+   prompt has already been printed. Clears from the start of the
+   editable region to EOL, then writes the new buffer. */
+static void repaint(const char *buf, int old_len, int new_len) {
+    /* Move left `old_len` times to the start of input. */
+    for (int i = 0; i < old_len; i++) u_putc('\b');
+    /* Write new buffer. */
+    for (int i = 0; i < new_len; i++) u_putc(buf[i]);
+    /* If old was longer, pad with spaces + backspace to erase tail. */
+    if (old_len > new_len) {
+        int tail = old_len - new_len;
+        for (int i = 0; i < tail; i++) u_putc(' ');
+        for (int i = 0; i < tail; i++) u_putc('\b');
+    }
+}
+
+/* Find the start of the last whitespace-delimited token in `buf[..len]`.
+   Returns index into buf. */
+static int last_token_start(const char *buf, int len) {
+    int i = len;
+    while (i > 0 && buf[i - 1] != ' ' && buf[i - 1] != '\t') i--;
+    return i;
+}
+
+/* Tab completion: scan /bin for entries that start with the prefix
+   and, if exactly one matches, append the rest into `buf`. If
+   multiple match, print the list on a fresh line and redraw. */
+struct readdir_ent { char name[64]; uint32_t type; };
+
+static int tab_complete(char *buf, int *len) {
+    int start = last_token_start(buf, *len);
+    const char *pref = buf + start;
+    int pref_len = *len - start;
+    if (pref_len == 0) return 0;
+
+    struct readdir_ent e;
+    char matches[8][64];
+    int  nmatches = 0;
+    for (uint32_t idx = 0;
+         nmatches < 8 &&
+         _syscall3(SYS_READDIR, (long)(uintptr_t)"/bin", idx,
+                   (long)(uintptr_t)&e) == 0;
+         idx++) {
+        int ok = 1;
+        for (int i = 0; i < pref_len; i++) {
+            if (e.name[i] != pref[i]) { ok = 0; break; }
+        }
+        if (!ok) continue;
+        int n = 0;
+        while (e.name[n] && n < 63) { matches[nmatches][n] = e.name[n]; n++; }
+        matches[nmatches][n] = 0;
+        nmatches++;
+    }
+
+    if (nmatches == 0) return 0;
+    if (nmatches == 1) {
+        /* Append the tail plus a space. */
+        const char *m = matches[0];
+        int i = pref_len;
+        while (m[i] && *len < LINE_MAX - 2) {
+            buf[(*len)++] = m[i];
+            u_putc(m[i]);
+            i++;
+        }
+        if (*len < LINE_MAX - 1) { buf[(*len)++] = ' '; u_putc(' '); }
+        return 1;
+    }
+    /* Multiple: list them, redraw prompt+buffer. */
+    u_putc('\n');
+    for (int i = 0; i < nmatches; i++) {
+        u_puts_n(matches[i]); u_putc('\t');
+    }
+    u_putc('\n');
+    u_puts_n("$ ");
+    for (int i = 0; i < *len; i++) u_putc(buf[i]);
+    return 1;
+}
+
+/* Read a line with history + tab completion. Returns length (not
+   counting NUL), 0 on EOF. */
+static long shell_readline(char *buf, int cap) {
+    int len = 0;
+    int hist_pos = -1;          /* -1 = live buffer; 0..n = history entry */
+    char saved[LINE_MAX];       /* snapshot of live buffer when walking history */
+    int  saved_len = 0;
+
+    for (;;) {
+        char c;
+        long n = sys_read(0, &c, 1);
+        if (n < 0) return -1;
+        if (n == 0) return 0;
+
+        unsigned char uc = (unsigned char)c;
+        if (uc == '\n') {
+            buf[len] = 0;
+            return len;
+        }
+        if (uc == '\b' || uc == 0x7F) {
+            if (len > 0) len--;   /* kernel already painted the rub-out */
+            continue;
+        }
+        if (uc == '\t') {
+            tab_complete(buf, &len);
+            continue;
+        }
+        if (uc == K_UP || uc == K_DOWN) {
+            int new_pos = hist_pos + (uc == K_UP ? 1 : -1);
+            if (new_pos < -1 || new_pos >= hist_count) continue;
+            if (hist_pos == -1) {
+                /* Leaving live buffer — save it. */
+                for (int i = 0; i < len; i++) saved[i] = buf[i];
+                saved_len = len;
+            }
+            hist_pos = new_pos;
+            int old_len = len;
+            if (hist_pos == -1) {
+                for (int i = 0; i < saved_len; i++) buf[i] = saved[i];
+                len = saved_len;
+            } else {
+                const char *h = hist_get(hist_pos);
+                int i = 0;
+                while (h[i] && i < cap - 1) { buf[i] = h[i]; i++; }
+                len = i;
+            }
+            repaint(buf, old_len, len);
+            continue;
+        }
+        /* Ignore other control bytes (left/right/home/end/del). */
+        if (uc < 0x20 || uc >= 0x80) continue;
+        if (len < cap - 1) {
+            buf[len++] = (char)uc;
+            /* kernel echoed it already */
+        }
+    }
+}
+
+/* --- $VAR / ${VAR} expansion. Writes the expanded copy into `out`
+   (cap bytes). Returns 0 on success, -1 on overflow. */
+static int expand_vars(const char *in, char *out, int cap) {
+    int oi = 0;
+    for (int i = 0; in[i]; i++) {
+        if (in[i] != '$') {
+            if (oi >= cap - 1) return -1;
+            out[oi++] = in[i];
+            continue;
+        }
+        /* Parse name: {NAME} or bare alnum+underscore. */
+        i++;
+        char name[64];
+        int ni = 0;
+        int braced = (in[i] == '{');
+        if (braced) i++;
+        while (in[i] &&
+               ((in[i] >= 'A' && in[i] <= 'Z') ||
+                (in[i] >= 'a' && in[i] <= 'z') ||
+                (in[i] >= '0' && in[i] <= '9') ||
+                in[i] == '_')) {
+            if (ni < 63) name[ni++] = in[i];
+            i++;
+        }
+        name[ni] = 0;
+        if (braced && in[i] == '}') i++;
+        else i--;   /* step back; the outer loop will re-read this byte */
+        extern char *getenv(const char *);
+        const char *val = getenv(name);
+        if (!val) continue;
+        while (*val) {
+            if (oi >= cap - 1) return -1;
+            out[oi++] = *val++;
+        }
+    }
+    out[oi] = 0;
+    return 0;
+}
+
 static int run_interactive(void) {
     char line[LINE_MAX];
+    char expanded[LINE_MAX];
     for (;;) {
         u_puts_n("$ ");
-        long n = u_readline(0, line, sizeof(line));
-        if (n <= 0) return 0;          /* EOF or read error */
-        run_line(line);
+        long n = shell_readline(line, sizeof(line));
+        if (n < 0) return 1;
+        if (n == 0) { u_putc('\n'); continue; }
+        hist_push(line);
+        if (expand_vars(line, expanded, sizeof(expanded)) == 0) {
+            run_line(expanded);
+        } else {
+            run_line(line);    /* overflow — run as-is */
+        }
     }
 }
 

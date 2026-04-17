@@ -217,7 +217,8 @@ $(BUILD_USER)/lua: $(BUILD_USER)/crt0.o $(LUA_OBJS) \
 	    build/sysroot/usr/lib/libulib.a \
 	    build/sysroot/usr/lib/libvibc.a
 
-$(X64_USER_TARGETS): $(BUILD_USER)/%: $(BUILD_USER)/crt0.o $(BUILD_USER)/%.o
+# Targets with their own recipes below (shell) get filtered out.
+$(filter-out $(BUILD_USER)/shell,$(X64_USER_TARGETS)): $(BUILD_USER)/%: $(BUILD_USER)/crt0.o $(BUILD_USER)/%.o
 	@mkdir -p $(dir $@)
 	x86_64-elf-ld -T user/user.ld -nostdlib -o $@ $^
 
@@ -237,6 +238,15 @@ $(BUILD_USER)/vi: $(BUILD_USER)/crt0.o $(BUILD_USER)/vi.o \
 	    build/sysroot/usr/lib/libvibc.a \
 	    build/sysroot/usr/lib/libulib.a \
 	    build/sysroot/usr/lib/libvibc.a
+
+# Shell pulls in libulib.a for getenv + environ maintenance so the
+# interactive $VAR expansion works.
+$(BUILD_USER)/shell: $(BUILD_USER)/crt0.o $(BUILD_USER)/shell.o \
+                     build/sysroot/usr/lib/libulib.a
+	@mkdir -p $(dir $@)
+	x86_64-elf-ld -T user/user.ld -nostdlib -static \
+	    -o $@ $(BUILD_USER)/crt0.o $(BUILD_USER)/shell.o \
+	    build/sysroot/usr/lib/libulib.a
 
 # Dynamic user binaries: PT_INTERP=/lib/ld-lighthos.so.1 + DT_NEEDED
 # so the runtime linker resolves symbols at load time.
