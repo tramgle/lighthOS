@@ -66,7 +66,7 @@ static int fg_builtin(void) {
         int st = 0;
         sys_waitpid(pid, &st);
         sys_tcsetpgrp((int)sys_getpid());
-        if ((st & 0xFF) == 0x7F) {
+        if (st & 0x100) {
             /* Stopped again — keep the job entry live so another
                fg/bg can pick it up. Print a banner like Ctrl-Z did. */
             u_puts_n("\n[stopped] "); u_puts_n(jobs[i].cmd); u_putc('\n');
@@ -247,11 +247,11 @@ static int run_pipeline(struct stage *stages, int nstages,
     for (int i = 0; i < npids; i++) {
         int st = 0;
         sys_waitpid(pids[i], &st);
-        /* POSIX stop-status encoding: low byte 0x7f. If the first
-           stage we were waiting on got Ctrl-Z'd, stop waiting for
-           the rest of the pipeline — they'll either follow it down
-           or we'll pick them up later via fg/bg. */
-        if ((st & 0xFF) == 0x7F) {
+        /* Stop-status sentinel: bit 0x100 set. If the first stage
+           we were waiting on got Ctrl-Z'd, stop waiting for the
+           rest of the pipeline — they'll either follow it down or
+           we'll pick them up later via fg/bg. */
+        if (st & 0x100) {
             stopped = 1;
             last_status = st;
             break;

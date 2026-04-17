@@ -45,6 +45,7 @@
 #define SYS_CHROOT   161
 #define SYS_MPROTECT 125
 
+#define SIG_HUP    1
 #define SIG_INT    2
 #define SIG_KILL   9
 #define SIG_ALRM  14

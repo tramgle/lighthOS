@@ -59,7 +59,7 @@ X64_USER_TEST   = runtests assert forktest fstest mmaptest envtest \
 X64_USER_PROD   = hello shell bomb find rm stty \
                   echo cat wc head tail grep cp mv touch ls sleep mkdir \
                   mount umount chroot env \
-                  strace \
+                  strace pkill \
                   hexdump pagemap regions \
                   flappy
 X64_USER        = $(X64_USER_PROD) $(X64_USER_TEST)

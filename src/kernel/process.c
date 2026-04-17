@@ -7,7 +7,7 @@
  *     spawn_from_memory — backs SYS_SPAWN.
  *   - process_fork: snapshot parent user pages, duplicate fd table.
  *   - process_waitpid: block until child exits or stops (POSIX-style
- *     stop-status encoding, low byte 0x7f).
+ *     stop-status encoding via a bit-0x100 sentinel so it can't
  *   - process_exit: mark dead, self-reap orphans, yield.
  *   - Signals (user handlers + kernel-default for STOP/CONT/KILL),
  *     pgroups, chroot, pipes, strace ring, alarm — all live.
@@ -424,13 +424,16 @@ int process_waitpid(uint32_t pid, int *status) {
             return (int)pid;
         }
         /* Report stops once, so the parent can pick up a Ctrl-Z'd
-           pipeline and move on. POSIX encoding: low byte 0x7f +
-           signal in the high byte. SIG_CONT clears stopped_reported
-           so a later stop re-reports. */
+           pipeline and move on. Encoding: bit 0x100 marks a stop;
+           SIG_STOP sits in the low byte. We deliberately DON'T use
+           POSIX's "low byte 0x7f" here because 127 is also a real
+           exit code (shell returns 127 when execve fails) and that
+           would trip the shell's stop detector. SIG_CONT clears
+           stopped_reported so a later stop re-reports. */
         if (p->task && p->task->state == TASK_STOPPED &&
             !p->stopped_reported) {
             p->stopped_reported = true;
-            if (status) *status = 0x7F | (SIG_STOP << 8);
+            if (status) *status = 0x100 | SIG_STOP;
             return (int)pid;
         }
         task_yield();
