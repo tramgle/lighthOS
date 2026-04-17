@@ -24,6 +24,11 @@ struct stage { char *argv[MAX_ARGS]; int argc; };
 struct job { int pid; int alive; char cmd[64]; };
 static struct job jobs[MAX_JOBS];
 
+/* Tracks the exit status of the previous command group so `$?`
+   expands correctly and `&&` / `||` can short-circuit. Updated by
+   run_logops after each segment; seeded to 0 at startup. */
+static int g_last_status = 0;
+
 static void job_add(int pid, const char *cmd) {
     for (int i = 0; i < MAX_JOBS; i++) {
         if (!jobs[i].alive) {
@@ -390,6 +395,74 @@ static int run_line(char *line) {
                         background, saved);
 }
 
+/* Forward declaration — expand_vars lives further down next to the
+   interactive-mode helpers. */
+static int expand_vars(const char *in, char *out, int cap);
+
+/* Split `line` at `;`, `&&`, `||` (quote-aware) and dispatch each
+   segment to run_line, gating execution on g_last_status so
+   short-circuit evaluation works. Returns the final segment's
+   status. */
+static int run_logops(char *line) {
+    int i = 0;
+    int prev_op = 0;    /* 0=start, 1=;, 2=&&, 3=|| */
+    while (line[i]) {
+        while (line[i] == ' ' || line[i] == '\t') i++;
+        if (!line[i] || line[i] == '\n') break;
+
+        int start = i;
+        char in_q = 0;
+        while (line[i]) {
+            char c = line[i];
+            if (in_q) {
+                if (c == in_q) in_q = 0;
+                i++; continue;
+            }
+            if (c == '"' || c == '\'') { in_q = c; i++; continue; }
+            if (c == '\n') break;
+            if (c == '#') break;                  /* comment ends segment */
+            if (c == ';') break;
+            if (c == '&' && line[i+1] == '&') break;
+            if (c == '|' && line[i+1] == '|') break;
+            i++;
+        }
+
+        char save = line[i];
+        line[i] = 0;
+        /* `#` as stop char means a comment started; nothing else on
+           the line is meant to run. Finalize this segment then bail. */
+        int line_is_done = (save == '#' || save == '\n' || save == 0);
+
+        int should_run = 1;
+        if (prev_op == 2 && g_last_status != 0) should_run = 0;  /* && */
+        if (prev_op == 3 && g_last_status == 0) should_run = 0;  /* || */
+
+        if (should_run) {
+            /* Copy segment — run_line mutates its input and we want
+               the outer line intact for later iterations. Variable
+               expansion happens here, AFTER the preceding segment
+               ran, so `false ; echo $?` sees the updated status
+               rather than whatever $? was at line start. */
+            char seg[LINE_MAX];
+            int si = 0;
+            for (int j = start; line[j] && si < LINE_MAX - 1; j++) seg[si++] = line[j];
+            seg[si] = 0;
+            char expanded[LINE_MAX];
+            char *src = (expand_vars(seg, expanded, sizeof(expanded)) == 0)
+                        ? expanded : seg;
+            g_last_status = run_line(src);
+        }
+
+        line[i] = save;
+        if (line_is_done) break;
+        if (save == ';') { prev_op = 1; i++; }
+        else if (save == '&' && line[i+1] == '&') { prev_op = 2; i += 2; }
+        else if (save == '|' && line[i+1] == '|') { prev_op = 3; i += 2; }
+        else i++;
+    }
+    return g_last_status;
+}
+
 static int run_script(const char *path) {
     int fd = sys_open(path, O_RDONLY);
     if (fd < 0) { u_puts_n("shell: cannot open "); u_puts_n(path); u_putc('\n'); return 1; }
@@ -398,7 +471,10 @@ static int run_script(const char *path) {
     for (;;) {
         long n = u_readline(fd, line, sizeof(line));
         if (n <= 0) break;
-        if (run_line(line) != 0) any_fail = 1;
+        /* Expansion happens inside run_logops per-segment so `$?`
+           reflects the preceding segment's status, not the previous
+           line's. */
+        if (run_logops(line) != 0) any_fail = 1;
     }
     sys_close(fd);
     return any_fail;
@@ -701,8 +777,8 @@ static long shell_readline(char *buf, int cap) {
     }
 }
 
-/* --- $VAR / ${VAR} expansion. Writes the expanded copy into `out`
-   (cap bytes). Returns 0 on success, -1 on overflow. */
+/* --- $VAR / ${VAR} / $? expansion. Writes the expanded copy into
+   `out` (cap bytes). Returns 0 on success, -1 on overflow. */
 static int expand_vars(const char *in, char *out, int cap) {
     int oi = 0;
     for (int i = 0; in[i]; i++) {
@@ -711,8 +787,22 @@ static int expand_vars(const char *in, char *out, int cap) {
             out[oi++] = in[i];
             continue;
         }
-        /* Parse name: {NAME} or bare alnum+underscore. */
         i++;
+        /* $? expands to the previous command's exit status in decimal. */
+        if (in[i] == '?') {
+            char buf[16];
+            int bi = 0;
+            int v = g_last_status;
+            if (v < 0) { if (oi < cap - 1) out[oi++] = '-'; v = -v; }
+            if (v == 0) buf[bi++] = '0';
+            while (v > 0) { buf[bi++] = (char)('0' + (v % 10)); v /= 10; }
+            while (bi > 0) {
+                if (oi >= cap - 1) return -1;
+                out[oi++] = buf[--bi];
+            }
+            continue;
+        }
+        /* Parse name: {NAME} or bare alnum+underscore. */
         char name[64];
         int ni = 0;
         int braced = (in[i] == '{');
@@ -814,11 +904,8 @@ static int run_interactive(void) {
         if (n < 0) return 1;
         if (n == 0) continue;
         hist_push(line);
-        if (expand_vars(line, expanded, sizeof(expanded)) == 0) {
-            run_line(expanded);
-        } else {
-            run_line(line);    /* overflow — run as-is */
-        }
+        (void)expanded;
+        run_logops(line);    /* run_logops expands per-segment */
     }
 }
 
@@ -828,12 +915,13 @@ int main(int argc, char **argv, char **envp) {
         /* One-shot: run the string as a single shell line. Used by
            libvibc's system() / popen() so callers get shell globbing
            and redirection (>, >>, <, |, &) instead of having their
-           tokens handed straight to execve. */
+           tokens handed straight to execve. Supports the full
+           ;/&&/|| operator set via run_logops. */
         char line[LINE_MAX];
         int i = 0;
         while (argv[2][i] && i < LINE_MAX - 1) { line[i] = argv[2][i]; i++; }
         line[i] = 0;
-        return run_line(line);
+        return run_logops(line);
     }
     if (argc >= 2) return run_script(argv[1]);
     return run_interactive();
