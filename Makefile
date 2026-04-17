@@ -334,7 +334,7 @@ x64-userland: $(X64_USER_TARGETS) $(X64_USER_LIBC_TARGETS) \
               $(BUILD_USER)/lua $(BUILD_USER)/vi \
               $(BUILD_USER)/dynhello $(BUILD_USER)/dyn_echo $(BUILD_USER)/dlopentest
 
-.PHONY: all clean iso run run-disk run-vga debug docker-build docker-run test docker-test iso-ready user-programs fix-perms docker-lua-compile bootdisk run-bootdisk docker-bootdisk docker-disk test-iso docker-test-iso test-disk docker-test-disk run-installed
+.PHONY: all clean iso run run-disk run-vga run-vga-iso run-vga-both debug docker-build docker-run test docker-test iso-ready user-programs fix-perms docker-lua-compile bootdisk run-bootdisk docker-bootdisk docker-disk test-iso docker-test-iso test-disk docker-test-disk run-installed
 
 all: $(ISO)
 
@@ -423,9 +423,34 @@ run-disk: iso-ready $(DISK_IMG)
 	qemu-system-x86_64 -cdrom $(ISO) -drive file=$(DISK_IMG),format=raw,if=ide \
 		-nographic -m 128M
 
-# run-vga opens a graphical window (or VNC) with VGA, serial on stdio
-run-vga: iso-ready
-	qemu-system-x86_64 -cdrom $(ISO) -serial stdio -m 128M
+# run-vga boots the self-contained bootdisk with a VGA window as the
+# primary display. PS/2 keyboard input comes in via FD_CONSOLE's
+# keyboard branch; text goes out through console.c's ANSI decoder to
+# vga_putchar. Serial is captured to build/serial.log for post-boot
+# inspection (kernel log + boot output). The kernel winsize cache
+# stays at the 24x80 default since no VT terminal is attached to
+# answer CSI-6n — vi + other programs that honor it lay out in 24
+# text rows + 1 status row = 25 = VGA text-mode geometry. Match.
+run-vga: docker-bootdisk
+	qemu-system-x86_64 -drive file=build/bootdisk.img,format=raw,if=ide \
+		-m 128M -serial file:build/serial.log
+
+# run-vga-iso: same idea but boots the ISO (not the self-hosting
+# disk image). Useful when the bootdisk flow itself is what you're
+# debugging and you want a known-good media to compare against.
+run-vga-iso: iso-ready
+	qemu-system-x86_64 -cdrom $(ISO) -m 128M -serial file:build/serial.log
+
+# run-vga-both: VGA window AND an interactive serial on stdio.
+# Anything CSI-6n-capable answering on stdio will populate the kernel
+# winsize cache to the host terminal's real size — which then
+# drives vi's layout even though the VGA display is still 80x25.
+# Don't use this if you want the VGA editor to look right; use
+# plain `run-vga` instead. Good for dev loops where you want to
+# type at the serial side and watch output on VGA.
+run-vga-both: docker-bootdisk
+	qemu-system-x86_64 -drive file=build/bootdisk.img,format=raw,if=ide \
+		-m 128M -serial stdio
 
 debug: iso-ready
 	qemu-system-x86_64 -cdrom $(ISO) -nographic -m 128M \

@@ -12,9 +12,16 @@
 #define puts(s)    u_puts_n(s)
 #define putchar(c) u_putc(c)
 
-#define SCREEN_ROWS 24   /* rows 0-23 for text */
-#define SCREEN_COLS 80
-#define STATUS_ROW  24   /* row 24 = status bar */
+/* Screen dims are queried from the kernel's cached terminal size
+   (SYS_TTY_WINSZ) at startup, or pulled from $LINES/$COLUMNS if the
+   shell already probed. Status bar sits on the bottom row; text
+   occupies rows 0..status_row-1. The compile-time fallback is 24x80
+   so the whole editor still works if nobody ever probed. */
+#define SCREEN_ROWS_MAX 128
+#define SCREEN_COLS_MAX 512
+static int screen_rows = 24;
+static int screen_cols = 80;
+static int status_row  = 24;
 #define MAX_LINES   512
 #define MAX_LINE_LEN 256
 
@@ -219,12 +226,12 @@ static int save_file(const char *path) {
 static void render(void) {
     term_clear();
 
-    for (int row = 0; row < SCREEN_ROWS; row++) {
+    for (int row = 0; row < screen_rows; row++) {
         int doc_line = scroll_offset + row;
         term_move(row, 0);
         if (doc_line < num_lines) {
             int len = linelen(doc_line);
-            if (len > SCREEN_COLS) len = SCREEN_COLS;
+            if (len > screen_cols) len = screen_cols;
             if (len > 0) sys_write(1, lines[doc_line], len);
         } else {
             putchar('~');
@@ -232,7 +239,7 @@ static void render(void) {
     }
 
     /* Status bar */
-    term_move(STATUS_ROW, 0);
+    term_move(status_row, 0);
     const char *mode_str = "NORMAL";
     if (mode == MODE_INSERT) mode_str = "INSERT";
     else if (mode == MODE_COMMAND) mode_str = "COMMAND";
@@ -251,7 +258,7 @@ static void render(void) {
 
 static void scroll_to_cursor(void) {
     if (cy < scroll_offset) scroll_offset = cy;
-    if (cy >= scroll_offset + SCREEN_ROWS) scroll_offset = cy - SCREEN_ROWS + 1;
+    if (cy >= scroll_offset + screen_rows) scroll_offset = cy - screen_rows + 1;
 }
 
 /* --- Search ---
@@ -569,6 +576,18 @@ static int handle_command(void) {
 /* --- Main --- */
 
 int main(int argc, char **argv) {
+    /* Pull live terminal size from the kernel cache (shell populates
+       it via CSI-6n at interactive startup). Fall back to 24x80 if
+       the cache is defaulted. status_row = bottom row; text region
+       is everything above it. */
+    {
+        uint16_t r = 0, c = 0;
+        sys_tty_getsize(&r, &c);
+        if (r > 2 && r <= SCREEN_ROWS_MAX) screen_rows = r - 1;
+        if (c > 0 && c <= SCREEN_COLS_MAX) screen_cols = c;
+        status_row = screen_rows;
+    }
+
     filename[0] = '\0';
     num_lines = 1;
     lines[0][0] = '\0';
@@ -612,7 +631,7 @@ int main(int argc, char **argv) {
             }
 
             /* Render command line on status row while in command mode */
-            term_move(STATUS_ROW, 0);
+            term_move(status_row, 0);
             putchar(':');
             puts(cmdbuf);
             term_clear_line();
@@ -639,7 +658,7 @@ int main(int argc, char **argv) {
                 cmdbuf[cmdlen] = '\0';
             }
 
-            term_move(STATUS_ROW, 0);
+            term_move(status_row, 0);
             putchar('/');
             puts(cmdbuf);
             term_clear_line();
