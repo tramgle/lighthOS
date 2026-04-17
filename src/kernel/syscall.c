@@ -19,6 +19,7 @@
 #include "lib/string.h"
 #include "drivers/serial.h"
 #include "drivers/vga.h"
+#include "drivers/keyboard.h"
 
 /* Thin wrappers so the SYS_EXECVE case body reads cleanly even
    though heap.h's names don't have module-prefix namespacing. */
@@ -526,8 +527,10 @@ mmap_done:
     case SYS_TTY_POLL:
         /* Non-blocking "is there a byte ready on the console?" test.
            Userspace uses this to back off probes (CSI-6n) that might
-           never get answered. */
-        regs->rax = (serial_has_data() ? 1 : 0);
+           never get answered AND for games like flappy to poll for
+           input without blocking. Checks BOTH rings — otherwise
+           PS/2 keystrokes on a VGA session go invisible. */
+        regs->rax = (serial_has_data() || keyboard_has_key()) ? 1 : 0;
         break;
 
     case SYS_VGA_GFX: {
