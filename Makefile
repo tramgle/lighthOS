@@ -191,7 +191,7 @@ build/sysroot/usr/lib/ld-lighthos.so.1: build/ldso/crt0_ldso.o \
 LUA_SRC_DIR = third_party/lua/src
 LUA_CORE = lapi lcode lctype ldebug ldo ldump lfunc lgc llex lmem lobject \
            lopcodes lparser lstate lstring ltable ltm lundump lvm lzio
-LUA_LIB  = lauxlib lbaselib lmathlib lstrlib ltablib liolib loslib lcorolib lutf8lib ldblib
+LUA_LIB  = lauxlib lbaselib lmathlib lstrlib ltablib liolib loslib lcorolib lutf8lib ldblib loadlib
 LUA_OBJS = $(addprefix build/lua/, $(addsuffix .o, $(LUA_CORE) $(LUA_LIB)))
 
 LUA_CFLAGS = $(X64_LIBC_CFLAGS) -I$(LUA_SRC_DIR) \

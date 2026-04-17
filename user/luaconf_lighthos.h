@@ -17,6 +17,14 @@
 #undef LUA_USE_READLINE
 #undef LUA_USE_DLOPEN
 
+/* require() search paths. Stock Lua defaults to /usr/local/share/...
+   which doesn't exist on our FS. Search /lib/lua/ and the cwd. The
+   trailing "./?/init.lua" lets `require 'foo'` find `./foo/init.lua`
+   too, matching the standard lua convention. C-module loading
+   remains disabled (LUA_USE_DLOPEN not defined). */
+#define LUA_PATH_DEFAULT  "/lib/lua/?.lua;/lib/lua/?/init.lua;./?.lua;./?/init.lua"
+#define LUA_CPATH_DEFAULT ""
+
 /* io.popen: libvibc provides popen()/pclose() over pipe+fork+execve
    (user/libc/stdio.c). Override Lua's POSIX-gated l_popen so we get
    working io.popen without also dragging in fseeko / flockfile /
